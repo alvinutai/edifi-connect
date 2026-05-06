@@ -1,0 +1,17 @@
+{
+  "name": "edifi-connect-service",
+  "version": "1.0.0",
+  "description": "EDiFi Connect — local desktop bridge for portal session scraping",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "playwright": "^1.49.0",
+    "ws": "^8.16.0",
+    "axios": "^1.6.0"
+  }
+}
