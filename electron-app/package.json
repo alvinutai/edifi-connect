@@ -1,0 +1,72 @@
+{
+  "name": "edifi-connect",
+  "version": "2.0.0",
+  "description": "EDiFi Connect — Bridges your dental office to EDiFi Cloud",
+  "author": "Elite Dental Force Inc. <alvin@elitedentalforce.com>",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64",
+    "build:dir": "electron-builder --win --x64 --dir"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "playwright": "^1.44.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.elitedentalforce.edifi-connect",
+    "productName": "EDiFi Connect",
+    "copyright": "Copyright 2026 Elite Dental Force Inc.",
+    "directories": {
+      "buildResources": "build-assets"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createStartMenuShortcut": false,
+      "createDesktopShortcut": false,
+      "runAfterFinish": true,
+      "installerHeaderIcon": null
+    },
+    "files": [
+      "main.js",
+      "od-detect.js",
+      "setup.html",
+      "setup-preload.js",
+      "node_modules/**",
+      "!node_modules/playwright/.local-browsers/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../chrome-extension",
+        "to": "chrome-extension",
+        "filter": [
+          "**/*",
+          "!*.map"
+        ]
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/playwright/**"
+    ]
+  }
+}

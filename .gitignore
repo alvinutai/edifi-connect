@@ -1,0 +1,9 @@
+node_modules/
+desktop-service/node.exe
+desktop-service/node_modules/
+electron-app/node_modules/
+electron-app/dist/
+dist/
+*.zip
+*.log
+.edifi-connect/

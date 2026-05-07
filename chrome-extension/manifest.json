@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "EDiFi Connect",
+  "version": "2.0.0",
+  "description": "Connects your dental insurance portals to EDiFi — no credentials to share.",
+  "permissions": ["cookies", "storage", "notifications", "tabs"],
+  "host_permissions": [
+    "*://*.deltadentalins.com/*",
+    "*://*.deltadental.com/*",
+    "*://*.dental.provider.metlife.com/*",
+    "*://*.planconnect.metlife.com/*",
+    "*://*.cignaforhcp.cigna.com/*",
+    "*://*.dentalofficetoolkit.com/*",
+    "*://*.aetna.com/*",
+    "*://*.uhcprovider.com/*",
+    "*://*.guardianlife.com/*",
+    "*://*.selecthealth.org/*",
+    "*://*.emihealth.com/*",
+    "*://*.deltadentalwa.com/*",
+    "*://*.deltadentalil.com/*",
+    "*://*.providers.deltadentalmo.com/*",
+    "*://*.deltadentalma.com/*",
+    "http://localhost:47821/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "EDiFi Connect"
+  }
+}
