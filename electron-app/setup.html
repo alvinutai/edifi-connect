@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EDiFi Connect Setup</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f9fafb;
+      color: #111827;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .logo-box {
+      width: 40px; height: 40px;
+      background: #001f71; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 800; font-size: 16px;
+    }
+    h1 { font-size: 22px; font-weight: 700; color: #001f71; }
+    p.sub { font-size: 13px; color: #6b7280; margin-bottom: 28px; text-align: center; }
+
+    .card {
+      background: white; border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      padding: 28px; width: 100%; max-width: 420px;
+    }
+
+    .step { margin-bottom: 20px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+    input {
+      width: 100%; padding: 10px 12px;
+      border: 1px solid #d1d5db; border-radius: 8px;
+      font-size: 14px; color: #111827; background: #f9fafb;
+      outline: none; transition: border-color 0.15s;
+    }
+    input:focus { border-color: #001f71; background: white; }
+    .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+    .hint a { color: #001f71; cursor: pointer; text-decoration: underline; }
+
+    .od-status {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px; border-radius: 8px;
+      font-size: 13px; font-weight: 500;
+      border: 1px solid #d1d5db; background: #f9fafb;
+    }
+    .od-status.found { border-color: #bbf7d0; background: #f0fdf4; color: #15803d; }
+    .od-status.not-found { border-color: #fca5a5; background: #fef2f2; color: #dc2626; }
+    .od-status.detecting { color: #6b7280; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.green { background: #16a34a; }
+    .dot.red { background: #dc2626; }
+    .dot.gray { background: #9ca3af; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    button.primary {
+      width: 100%; padding: 12px;
+      background: #001f71; color: white;
+      border: none; border-radius: 8px;
+      font-size: 15px; font-weight: 600;
+      cursor: pointer; margin-top: 20px;
+      transition: background 0.15s;
+    }
+    button.primary:hover:not(:disabled) { background: #1a3a95; }
+    button.primary:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    .error { color: #dc2626; font-size: 13px; margin-top: 12px; text-align: center; }
+    .success { text-align: center; padding: 20px 0; }
+    .success .checkmark { font-size: 48px; margin-bottom: 12px; }
+    .success h2 { font-size: 18px; font-weight: 700; color: #15803d; margin-bottom: 8px; }
+    .success p { font-size: 13px; color: #6b7280; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="logo">
+    <div class="logo-box">E</div>
+    <h1>EDiFi Connect</h1>
+  </div>
+  <p class="sub">Connect your dental office to EDiFi in one step.</p>
+
+  <div class="card" id="setup-form">
+    <div class="step">
+      <label>Open Dental Status</label>
+      <div class="od-status detecting" id="od-status">
+        <div class="dot gray" id="od-dot"></div>
+        <span id="od-text">Detecting Open Dental...</span>
+      </div>
+      <div class="hint" style="margin-top:6px" id="od-hint"></div>
+    </div>
+
+    <div class="step">
+      <label>Open Dental API URL</label>
+      <input type="text" id="od-url" placeholder="http://localhost/opendentalapi" />
+      <div class="hint">Auto-detected from your server. Change if different.</div>
+    </div>
+
+    <div class="step">
+      <label>Your EDiFi Office Code</label>
+      <input type="text" id="office-code" placeholder="Paste the code from your EDiFi onboarding email" />
+      <div class="hint">
+        Find this in your EDiFi welcome email, or contact
+        <a onclick="openSupport()">EDiFi support</a>.
+      </div>
+    </div>
+
+    <div class="error" id="error-msg" style="display:none"></div>
+
+    <button class="primary" id="connect-btn" onclick="connect()" disabled>
+      Connect to EDiFi
+    </button>
+  </div>
+
+  <div class="success" id="success-view" style="display:none">
+    <div class="checkmark">✅</div>
+    <h2>Connected!</h2>
+    <p>
+      EDiFi Connect is now running in your system tray.<br>
+      Your office is connected to EDiFi Cloud.<br><br>
+      <strong>One more step:</strong> Install the Chrome extension to capture<br>
+      portal sessions automatically. Right-click the tray icon → "Install Chrome Extension".
+    </p>
+  </div>
+
+  <script>
+    function openSupport() {
+      // Contact support
+    }
+
+    // Enable connect button when office code is typed
+    document.getElementById('office-code').addEventListener('input', () => {
+      const code = document.getElementById('office-code').value.trim();
+      document.getElementById('connect-btn').disabled = code.length < 8;
+    });
+
+    // Detect OD on load
+    window.addEventListener('DOMContentLoaded', async () => {
+      if (!window.edifi) return;
+      try {
+        const od = await window.edifi.detectOD();
+        const statusEl = document.getElementById('od-status');
+        const dotEl = document.getElementById('od-dot');
+        const textEl = document.getElementById('od-text');
+        const hintEl = document.getElementById('od-hint');
+        const urlInput = document.getElementById('od-url');
+
+        if (od.found) {
+          statusEl.className = 'od-status found';
+          dotEl.className = 'dot green';
+          const verText = od.version ? ` v${od.version}` : '';
+          textEl.textContent = `Open Dental found${verText}`;
+
+          if (od.apiUrl && !od.apiUnreachable) {
+            urlInput.value = od.apiUrl;
+            hintEl.textContent = `Web Service detected at ${od.apiUrl}`;
+          } else if (od.apiUrl) {
+            urlInput.value = od.apiUrl;
+            hintEl.textContent = `Web Service not responding at ${od.apiUrl}. Make sure it is running in OD Setup → Web Service.`;
+          }
+        } else {
+          statusEl.className = 'od-status not-found';
+          dotEl.className = 'dot red';
+          textEl.textContent = 'Open Dental not detected on this computer';
+          hintEl.textContent = 'Run this installer on the computer where Open Dental is installed.';
+        }
+      } catch (e) {
+        document.getElementById('od-text').textContent = 'Detection error — please enter URL manually';
+      }
+    });
+
+    async function connect() {
+      const btn = document.getElementById('connect-btn');
+      const errorEl = document.getElementById('error-msg');
+      const officeCode = document.getElementById('office-code').value.trim();
+      const odApiUrl = document.getElementById('od-url').value.trim();
+
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+      errorEl.style.display = 'none';
+
+      try {
+        const result = await window.edifi.register({ officeCode, odApiUrl });
+        if (result.ok) {
+          document.getElementById('setup-form').style.display = 'none';
+          document.getElementById('success-view').style.display = 'block';
+        } else {
+          errorEl.textContent = result.error || 'Connection failed. Check your office code and try again.';
+          errorEl.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = 'Connect to EDiFi';
+        }
+      } catch (e) {
+        errorEl.textContent = 'Connection error. Make sure you are connected to the internet.';
+        errorEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Connect to EDiFi';
+      }
+    }
+  </script>
+</body>
+</html>

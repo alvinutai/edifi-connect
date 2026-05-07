@@ -236,6 +236,78 @@ function connectTunnel() {
   });
 }
 
+// ─── Setup Page ───────────────────────────────────────────────────────────────
+
+app.get('/setup', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EDiFi Connect Setup</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f9fafb; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+    .card { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 32px; width: 100%; max-width: 440px; }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .logo-box { width: 36px; height: 36px; background: #001f71; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 800; font-size: 16px; }
+    h1 { font-size: 20px; font-weight: 700; color: #001f71; }
+    p { font-size: 13px; color: #6b7280; margin: 8px 0 24px; }
+    label { display: block; font-size: 11px; font-weight: 700; color: #374151; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+    input { width: 100%; padding: 10px 12px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 14px; outline: none; transition: border-color 0.15s; font-family: monospace; }
+    input:focus { border-color: #001f71; }
+    .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; margin-bottom: 20px; }
+    button { width: 100%; padding: 12px; background: #001f71; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
+    button:hover:not(:disabled) { background: #1a3a95; }
+    button:disabled { background: #9ca3af; cursor: not-allowed; }
+    .status { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 13px; text-align: center; display: none; }
+    .status.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .status.error { background: #fef2f2; color: #dc2626; border: 1px solid #fca5a5; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-box">E</div>
+      <h1>EDiFi Connect Setup</h1>
+    </div>
+    <p>Connect this computer to EDiFi Cloud. Find your Office Code in EDiFi → Settings → Office tab.</p>
+    <label>EDiFi Office Code</label>
+    <input type="text" id="code" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" oninput="document.getElementById('btn').disabled=this.value.length<8" autocomplete="off" spellcheck="false">
+    <div class="hint">Paste the UUID from your EDiFi Settings page</div>
+    <button id="btn" onclick="connect()" disabled>Connect to EDiFi</button>
+    <div class="status" id="status"></div>
+  </div>
+  <script>
+    async function connect() {
+      const code = document.getElementById('code').value.trim();
+      const btn = document.getElementById('btn');
+      const status = document.getElementById('status');
+      btn.disabled = true; btn.textContent = 'Connecting...';
+      status.style.display = 'none';
+      try {
+        const r = await fetch('/register', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ office_id: code, api_key: null }) });
+        const data = await r.json();
+        if (data.ok) {
+          status.className = 'status success';
+          status.innerHTML = '✅ Connected! EDiFi Connect is running.<br><br>Install the Chrome extension to start capturing portal sessions.';
+          status.style.display = 'block';
+          btn.textContent = 'Connected!';
+        } else {
+          throw new Error('Connection failed');
+        }
+      } catch (e) {
+        status.className = 'status error';
+        status.textContent = 'Could not connect. Check your office code and try again.';
+        status.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Connect to EDiFi';
+      }
+    }
+  </script>
+</body>
+</html>`);
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, '127.0.0.1', () => {

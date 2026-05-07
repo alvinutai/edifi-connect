@@ -1,0 +1,43 @@
+{
+  "name": "flora-colossus",
+  "version": "3.0.2",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "typings": "dist/index.d.ts",
+  "description": "Walks your node_modules tree",
+  "author": "Samuel Attard",
+  "license": "MIT",
+  "keywords": [
+    "node_modules",
+    "walker"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "repository": "https://github.com/MarshallOfSound/flora-colossus",
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "pretest": "cd test/fixtures/xml2js && yarn --frozen-lockfile",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
+    "lint:fix": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\""
+  },
+  "dependencies": {
+    "debug": "^4.4.1"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.2",
+    "@types/debug": "^4.1.12",
+    "@types/node": "^22.0.13",
+    "@vitest/coverage-v8": "^3.2.4",
+    "prettier": "^3.6.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
