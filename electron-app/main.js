@@ -103,6 +103,7 @@ let lastOdSync = null;
 function connectTunnel() {
   if (!config.registered || !config.office_id) return;
   clearTimeout(reconnectTimer);
+  reconnectTimer = null;
 
   const url = `${EDIFI_CLOUD_WS}/connect/bridge?office_id=${encodeURIComponent(config.office_id)}`;
   log(`Tunnel connecting: ${url}`);
@@ -116,7 +117,13 @@ function connectTunnel() {
     // Announce available sessions
     const active = activeSessions();
     if (active.length > 0) {
-      tunnel.send(JSON.stringify({ type: "SESSIONS_AVAILABLE", count: active.length, payers: active.map((s) => s.payerCode) }));
+      tunnel.send(
+        JSON.stringify({
+          type: "SESSIONS_AVAILABLE",
+          count: active.length,
+          payers: active.map((s) => s.payerCode),
+        }),
+      );
     }
     // Start OD sync immediately then every 15 minutes
     syncODData();
@@ -137,7 +144,9 @@ function connectTunnel() {
         tunnel.send(JSON.stringify({ type: "SCRAPE_RESULT", ...result }));
       }
       if (msg.type === "OD_PUSH_ACK") {
-        log(`[OD Sync] ACK: ${msg.patients_processed} patients, ${msg.verifications_queued} verifications for ${msg.date}`);
+        log(
+          `[OD Sync] ACK: ${msg.patients_processed} patients, ${msg.verifications_queued} verifications for ${msg.date}`,
+        );
         lastOdSync = new Date();
         updateTray();
       }
@@ -156,7 +165,9 @@ function connectTunnel() {
             );
           })
           .catch((err) => {
-            log(`[Writeback] Error for snapshot ${snapshot_id}: ${err.message}`);
+            log(
+              `[Writeback] Error for snapshot ${snapshot_id}: ${err.message}`,
+            );
             tunnel.send(
               JSON.stringify({
                 type: "OD_WRITEBACK_ACK",
@@ -174,14 +185,23 @@ function connectTunnel() {
 
   tunnel.on("close", () => {
     tunnelOk = false;
-    log("Tunnel disconnected — reconnecting in 30s");
     updateTray();
-    if (odSyncInterval) { clearInterval(odSyncInterval); odSyncInterval = null; }
-    reconnectTimer = setTimeout(connectTunnel, 30000);
+    if (odSyncInterval) {
+      clearInterval(odSyncInterval);
+      odSyncInterval = null;
+    }
+    if (!reconnectTimer) {
+      log("Tunnel disconnected — reconnecting in 5s");
+      reconnectTimer = setTimeout(connectTunnel, 5000);
+    }
   });
 
   tunnel.on("error", (e) => {
     log(`Tunnel error: ${e.message}`);
+    tunnelOk = false;
+    if (!reconnectTimer) {
+      reconnectTimer = setTimeout(connectTunnel, 5000);
+    }
   });
 }
 
@@ -191,7 +211,7 @@ async function odGet(path) {
   const base = config.od_api_url;
   if (!base) return null;
   try {
-    const axios = require('axios');
+    const axios = require("axios");
     const r = await axios.get(`${base}${path}`, { timeout: 8000 });
     return r.data;
   } catch (e) {
@@ -204,74 +224,92 @@ async function odGet(path) {
 
 async function syncODData() {
   if (!config.od_api_url || !config.office_id) return;
-  if (!tunnelOk || !tunnel) { log('[OD Sync] Skipped — tunnel not connected'); return; }
+  if (!tunnelOk || !tunnel) {
+    log("[OD Sync] Skipped — tunnel not connected");
+    return;
+  }
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
   try {
     // 1. Get today's scheduled appointments
-    const allApts = await odGet(`/appointments?date=${today}`) ?? [];
+    const allApts = (await odGet(`/appointments?date=${today}`)) ?? [];
     const scheduled = Array.isArray(allApts)
-      ? allApts.filter(a => a.AptStatus === 'Scheduled')
+      ? allApts.filter((a) => a.AptStatus === "Scheduled")
       : [];
 
     if (scheduled.length === 0) {
-      log('[OD Sync] No scheduled appointments today');
+      log("[OD Sync] No scheduled appointments today");
       return;
     }
 
-    log(`[OD Sync] ${scheduled.length} scheduled appointments — fetching patient data...`);
+    log(
+      `[OD Sync] ${scheduled.length} scheduled appointments — fetching patient data...`,
+    );
 
     // 2. For each appointment, fetch patient + insurance (batch of 3)
     const enriched = [];
     const BATCH = 3;
     for (let i = 0; i < scheduled.length; i += BATCH) {
       const batch = scheduled.slice(i, i + BATCH);
-      const results = await Promise.all(batch.map(async (apt) => {
-        try {
-          const patient = await odGet(`/patients/${apt.PatNum}`);
-          if (!patient) return null;
+      const results = await Promise.all(
+        batch.map(async (apt) => {
+          try {
+            const patient = await odGet(`/patients/${apt.PatNum}`);
+            if (!patient) return null;
 
-          // Fetch insurance chain
-          const patPlans = await odGet(`/patplans?PatNum=${apt.PatNum}`) ?? [];
-          const insSubs = [], insPlans = [], carriers = [];
+            // Fetch insurance chain
+            const patPlans =
+              (await odGet(`/patplans?PatNum=${apt.PatNum}`)) ?? [];
+            const insSubs = [],
+              insPlans = [],
+              carriers = [];
 
-          for (const pp of patPlans.slice(0, 2)) { // primary + secondary only
-            const sub = await odGet(`/inssubs/${pp.InsSubNum}`);
-            if (sub) {
-              insSubs.push(sub);
-              const plan = await odGet(`/insplans/${sub.PlanNum}`);
-              if (plan) {
-                insPlans.push(plan);
-                const carrier = await odGet(`/carriers/${plan.CarrierNum}`);
-                if (carrier) carriers.push(carrier);
+            for (const pp of patPlans.slice(0, 2)) {
+              // primary + secondary only
+              const sub = await odGet(`/inssubs/${pp.InsSubNum}`);
+              if (sub) {
+                insSubs.push(sub);
+                const plan = await odGet(`/insplans/${sub.PlanNum}`);
+                if (plan) {
+                  insPlans.push(plan);
+                  const carrier = await odGet(`/carriers/${plan.CarrierNum}`);
+                  if (carrier) carriers.push(carrier);
+                }
               }
             }
-          }
 
-          return { ...apt, patient, insurance: { patPlans, insSubs, insPlans, carriers } };
-        } catch (e) {
-          log(`[OD Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
-          return null;
-        }
-      }));
+            return {
+              ...apt,
+              patient,
+              insurance: { patPlans, insSubs, insPlans, carriers },
+            };
+          } catch (e) {
+            log(`[OD Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
+            return null;
+          }
+        }),
+      );
       enriched.push(...results.filter(Boolean));
     }
 
     if (enriched.length === 0) {
-      log('[OD Sync] No appointments with complete patient data');
+      log("[OD Sync] No appointments with complete patient data");
       return;
     }
 
     // 3. Push through the tunnel
-    log(`[OD Sync] Pushing ${enriched.length} enriched appointments to EDiFi Cloud...`);
-    tunnel.send(JSON.stringify({
-      type: 'OD_DATA_PUSH',
-      date: today,
-      appointments: enriched,
-    }));
-
+    log(
+      `[OD Sync] Pushing ${enriched.length} enriched appointments to EDiFi Cloud...`,
+    );
+    tunnel.send(
+      JSON.stringify({
+        type: "OD_DATA_PUSH",
+        date: today,
+        appointments: enriched,
+      }),
+    );
   } catch (e) {
     log(`[OD Sync] Error: ${e.message}`);
   }
@@ -284,10 +322,12 @@ async function syncODData() {
  */
 async function writebackToOD(snapshotId, fields) {
   if (!config.od_api_url) {
-    throw new Error('od_api_url not configured — cannot write back to Open Dental');
+    throw new Error(
+      "od_api_url not configured — cannot write back to Open Dental",
+    );
   }
 
-  const axios = require('axios');
+  const axios = require("axios");
   const written = [];
 
   // Open Dental Web Service uses REST endpoints on PatPlan/InsSub for insurance fields.
@@ -308,27 +348,34 @@ async function writebackToOD(snapshotId, fields) {
         snapshot_id: snapshotId,
         fields: {
           eligibility_status: fields.eligibility_status,
-          individual_deductible_remaining: fields.individual_deductible_remaining,
+          individual_deductible_remaining:
+            fields.individual_deductible_remaining,
           annual_maximum_remaining: fields.annual_maximum_remaining,
           benefit_year_type: fields.benefit_year_type,
         },
-        source: 'edifi_verified',
+        source: "edifi_verified",
       },
       { timeout: 10000 },
     );
 
     if (r.data?.success) {
       written.push(...Object.keys(fields));
-      log(`[Writeback] Snapshot ${snapshotId} written OK: ${written.join(', ')}`);
+      log(
+        `[Writeback] Snapshot ${snapshotId} written OK: ${written.join(", ")}`,
+      );
       return { success: true, fields_written: written };
     }
 
-    log(`[Writeback] Snapshot ${snapshotId} OD returned failure: ${JSON.stringify(r.data)}`);
+    log(
+      `[Writeback] Snapshot ${snapshotId} OD returned failure: ${JSON.stringify(r.data)}`,
+    );
     return { success: false, fields_written: [] };
   } catch (err) {
     // 404 = endpoint not yet configured on this office's OD bridge — non-fatal
     if (err.response?.status === 404) {
-      log(`[Writeback] OD writeback endpoint not available for this office (404) — skipping`);
+      log(
+        `[Writeback] OD writeback endpoint not available for this office (404) — skipping`,
+      );
       return { success: false, fields_written: [] };
     }
     throw err;
@@ -468,9 +515,16 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
     return pg
       .$eval(
         [
-          ".results", ".eligibility-results", "#results", "#eligibilityResults",
-          ".benefits-summary", "#benefitsSummary", ".benefit-details",
-          "#content", "main", "body",
+          ".results",
+          ".eligibility-results",
+          "#results",
+          "#eligibilityResults",
+          ".benefits-summary",
+          "#benefitsSummary",
+          ".benefit-details",
+          "#content",
+          "main",
+          "body",
         ].join(", "),
         (el) => el.innerHTML,
       )
@@ -496,36 +550,57 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
       // Fill member lookup form
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
-        'input[aria-label*="member" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="mm/dd" i]', 'input[id*="dob" i]',
-        'input[aria-label*="birth" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+          'input[aria-label*="member" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="mm/dd" i]',
+          'input[id*="dob" i]',
+          'input[aria-label*="birth" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-          'input[id*="lastName" i]', 'input[aria-label*="last name" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          [
+            'input[name*="last" i]',
+            'input[placeholder*="last" i]',
+            'input[id*="lastName" i]',
+            'input[aria-label*="last name" i]',
+          ],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'input[type="submit"]',
-        'button:has-text("Search")', 'button:has-text("Check")',
-        'button:has-text("Verify")', 'button:has-text("Submit")',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Search")',
+        'button:has-text("Check")',
+        'button:has-text("Verify")',
+        'button:has-text("Submit")',
       ]);
-      await page.waitForSelector(
-        '.results, table.benefits, .eligibility-result, #eligibilityResults',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(
+          ".results, table.benefits, .eligibility-result, #eligibilityResults",
+          { timeout: 20000 },
+        )
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "DDIC") {
+    } else if (payerCode === "DDIC") {
       await page.goto("https://www1.deltadentalins.com/ciam/login", {
         waitUntil: "networkidle",
         timeout: 30000,
@@ -533,320 +608,460 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
       await page.waitForLoadState("networkidle").catch(() => {});
       // Session should redirect to portal — navigate to eligibility
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
-        'a:has-text("Benefits")', 'button:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+        'button:has-text("Eligibility")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[name*="id" i]', 'input[placeholder*="member" i]',
-        'input[id*="memberId" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]', 'input[id*="dob" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[name*="id" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+          'input[id*="dob" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[id*="last" i]',
-          'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          [
+            'input[name*="last" i]',
+            'input[id*="last" i]',
+            'input[placeholder*="last" i]',
+          ],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'input[type="submit"]',
-        'button:has-text("Search")', 'button:has-text("Check Eligibility")',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Search")',
+        'button:has-text("Check Eligibility")',
         'button:has-text("Submit")',
       ]);
-      await page.waitForSelector(
-        '.benefits, table, .eligibility, #results, .plan-details',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(
+          ".benefits, table, .eligibility, #results, .plan-details",
+          { timeout: 20000 },
+        )
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "DDCA") {
+    } else if (payerCode === "DDCA") {
       await page.goto("https://dentist.deltadental.com", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
         'a:has-text("Benefits")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
+        'button[type="submit"]',
+        'button:has-text("Search")',
         'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, table, .results, #eligibilityResults',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, table, .results, #eligibilityResults", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "METLIFE") {
+    } else if (payerCode === "METLIFE") {
       await page.goto("https://dental.provider.metlife.com", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
         'a:has-text("Benefits")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="patient" i]',
-        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]', 'input[id*="dob" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="patient" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+          'input[id*="dob" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[id*="lastName" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[id*="lastName" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Check Eligibility")',
-        'button:has-text("Search")', 'input[type="submit"]',
+        'button[type="submit"]',
+        'button:has-text("Check Eligibility")',
+        'button:has-text("Search")',
+        'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, .eligibility-summary, table, #content',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, .eligibility-summary, table, #content", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "CIGNA") {
+    } else if (payerCode === "CIGNA") {
       await page.goto("https://cignaforhcp.cigna.com", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
         'a:has-text("Coverage")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="id" i]',
-        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="id" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
-        'button:has-text("Find")', 'input[type="submit"]',
+        'button[type="submit"]',
+        'button:has-text("Search")',
+        'button:has-text("Find")',
+        'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, .coverage-details, table, #eligibility-results',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(
+          ".benefits, .coverage-details, table, #eligibility-results",
+          { timeout: 20000 },
+        )
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "GUARDIAN") {
+    } else if (payerCode === "GUARDIAN") {
       await page.goto("https://www.guardianlife.com/dental/dentists", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
-        'a:has-text("Benefits")', 'button:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+        'button:has-text("Eligibility")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]', 'input[id*="member" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="member" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
-        'button:has-text("Check")', 'input[type="submit"]',
+        'button[type="submit"]',
+        'button:has-text("Search")',
+        'button:has-text("Check")',
+        'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, .eligibility, table, .plan-summary',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, .eligibility, table, .plan-summary", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "UHC") {
+    } else if (payerCode === "UHC") {
       await page.goto("https://www.uhcprovider.com", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
         'a:has-text("Benefits")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="id" i]',
-        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="id" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
+        'button[type="submit"]',
+        'button:has-text("Search")',
         'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, .eligibility, table, #results',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, .eligibility, table, #results", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "SELECTHEALTH") {
+    } else if (payerCode === "SELECTHEALTH") {
       await page.goto("https://providers.selecthealth.org", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
         'a:has-text("Benefits")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
+        'button[type="submit"]',
+        'button:has-text("Search")',
         'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, table, .eligibility, #content',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, table, .eligibility, #content", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "EMIHEALTH") {
+    } else if (payerCode === "EMIHEALTH") {
       await page.goto("https://www.emihealth.com", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
-        'a:has-text("Provider")', 'a:has-text("Benefits")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
+        'a:has-text("Provider")',
+        'a:has-text("Benefits")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
+        'button[type="submit"]',
+        'button:has-text("Search")',
         'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, table, .eligibility, #content',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(".benefits, table, .eligibility, #content", {
+          timeout: 20000,
+        })
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else if (payerCode === "AETNA") {
-      await page.goto(
-        "https://www.aetna.com/health-care-professionals.html",
-        { waitUntil: "networkidle", timeout: 30000 },
-      );
+    } else if (payerCode === "AETNA") {
+      await page.goto("https://www.aetna.com/health-care-professionals.html", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
       await clickButton(page, [
-        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
-        'a:has-text("Benefits")', 'a:has-text("NaviNet")',
+        'a[href*="eligib" i]',
+        'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+        'a:has-text("NaviNet")',
         'a[href*="navinet" i]',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
-      await fillField(page, [
-        'input[name*="member" i]', 'input[name*="subscriber" i]',
-        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
-      ], member_id);
-      await fillField(page, [
-        'input[name*="dob" i]', 'input[name*="birth" i]',
-        'input[placeholder*="date" i]',
-      ], dob);
+      await fillField(
+        page,
+        [
+          'input[name*="member" i]',
+          'input[name*="subscriber" i]',
+          'input[placeholder*="member" i]',
+          'input[id*="memberId" i]',
+        ],
+        member_id,
+      );
+      await fillField(
+        page,
+        [
+          'input[name*="dob" i]',
+          'input[name*="birth" i]',
+          'input[placeholder*="date" i]',
+        ],
+        dob,
+      );
       if (subscriber_last_name) {
-        await fillField(page, [
-          'input[name*="last" i]', 'input[placeholder*="last" i]',
-        ], subscriber_last_name);
+        await fillField(
+          page,
+          ['input[name*="last" i]', 'input[placeholder*="last" i]'],
+          subscriber_last_name,
+        );
       }
       await clickButton(page, [
-        'button[type="submit"]', 'button:has-text("Search")',
-        'button:has-text("Check")', 'input[type="submit"]',
+        'button[type="submit"]',
+        'button:has-text("Search")',
+        'button:has-text("Check")',
+        'input[type="submit"]',
       ]);
-      await page.waitForSelector(
-        '.benefits, .eligibility, table, #eligibility-result',
-        { timeout: 20000 },
-      ).catch(() => {});
+      await page
+        .waitForSelector(
+          ".benefits, .eligibility, table, #eligibility-result",
+          { timeout: 20000 },
+        )
+        .catch(() => {});
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
-    }
-
-    else {
+    } else {
       // Unknown payer — capture whatever is on the page
       html_snapshot = await captureSnapshot(page);
     }
@@ -858,7 +1073,9 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
       payer_code: payerCode,
     };
   } catch (err) {
-    log(`[Scrape] performEligibilityScrape error (${payerCode}): ${err.message}`);
+    log(
+      `[Scrape] performEligibilityScrape error (${payerCode}): ${err.message}`,
+    );
     return {
       benefits: [],
       html_snapshot: "",
@@ -995,9 +1212,13 @@ function updateTray() {
     {
       label: lastOdSync
         ? `OD last synced: ${Math.round((Date.now() - lastOdSync) / 60000)}m ago`
-        : config.od_api_url ? "OD sync pending..." : "Open Dental not configured",
+        : config.od_api_url
+          ? "OD sync pending..."
+          : "Open Dental not configured",
       enabled: !!config.od_api_url,
-      click: () => { if (tunnelOk) syncODData(); },
+      click: () => {
+        if (tunnelOk) syncODData();
+      },
     },
     { type: "separator" },
     { label: "View logs", click: () => shell.openPath(LOG_PATH) },
@@ -1122,14 +1343,14 @@ app.whenReady().then(() => {
 
   // Silent auto-update — downloads in background, installs on next restart
   try {
-    const { autoUpdater } = require('electron-updater');
+    const { autoUpdater } = require("electron-updater");
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('update-downloaded', () => {
-      log('[Update] New version downloaded — will install on next restart');
+    autoUpdater.on("update-downloaded", () => {
+      log("[Update] New version downloaded — will install on next restart");
       updateTray();
     });
-    autoUpdater.on('error', (err) => log(`[Update] ${err.message}`));
+    autoUpdater.on("error", (err) => log(`[Update] ${err.message}`));
     autoUpdater.checkForUpdates().catch(() => {}); // Silently ignore network errors
   } catch (e) {
     log(`[Update] electron-updater not available: ${e.message}`);

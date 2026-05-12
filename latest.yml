@@ -1,0 +1,8 @@
+version: 2.1.0
+files:
+  - url: EDiFi-Connect-Setup-2.1.0.exe
+    sha512: EQSJvmAws12CCVAWYdrJN7SZa4Z4QMTHGrPIdKGYVvfLTQtkk+Y5dKcaG8xqonDiGy1+KbIfBxRBspKRN+0KYg==
+    size: 81543943
+path: EDiFi-Connect-Setup-2.1.0.exe
+sha512: EQSJvmAws12CCVAWYdrJN7SZa4Z4QMTHGrPIdKGYVvfLTQtkk+Y5dKcaG8xqonDiGy1+KbIfBxRBspKRN+0KYg==
+releaseDate: '2026-05-08T03:52:04.955Z'
