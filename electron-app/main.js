@@ -141,6 +141,32 @@ function connectTunnel() {
         lastOdSync = new Date();
         updateTray();
       }
+      if (msg.type === "OD_WRITEBACK_REQUEST") {
+        const { snapshot_id, fields, source, verified_at } = msg;
+        log(`[Writeback] Request for snapshot ${snapshot_id} source=${source}`);
+        writebackToOD(snapshot_id, fields)
+          .then((result) => {
+            tunnel.send(
+              JSON.stringify({
+                type: "OD_WRITEBACK_ACK",
+                snapshot_id,
+                success: result.success,
+                fields_written: result.fields_written,
+              }),
+            );
+          })
+          .catch((err) => {
+            log(`[Writeback] Error for snapshot ${snapshot_id}: ${err.message}`);
+            tunnel.send(
+              JSON.stringify({
+                type: "OD_WRITEBACK_ACK",
+                snapshot_id,
+                success: false,
+                error: err.message,
+              }),
+            );
+          });
+      }
     } catch (e) {
       log(`Tunnel message error: ${e.message}`);
     }
@@ -251,6 +277,64 @@ async function syncODData() {
   }
 }
 
+/**
+ * Write EDiFi-verified benefit data back to Open Dental via Web Service.
+ * Only writes the 4 governance-approved fields — never member_id or group_number.
+ * Returns { success, fields_written } or throws on hard failure.
+ */
+async function writebackToOD(snapshotId, fields) {
+  if (!config.od_api_url) {
+    throw new Error('od_api_url not configured — cannot write back to Open Dental');
+  }
+
+  const axios = require('axios');
+  const written = [];
+
+  // Open Dental Web Service uses REST endpoints on PatPlan/InsSub for insurance fields.
+  // We look up the PatPlanNum by matching the snapshot_id we stored in OD's Note field
+  // on the last sync, then PATCH the insurance fields.
+  // Since we don't store OD PatPlanNum directly, we use the eligibility_status note
+  // approach: write fields to the PatPlan note field as structured text.
+  // Full OD insurance API write-back (D2000 equivalent) requires knowing PatPlanNum
+  // which is available on the Electron side from the last OD sync cache.
+
+  try {
+    // Attempt to POST fields to a custom EDiFi endpoint on the OD Web Service bridge.
+    // The OD Web Service doesn't have a native benefit write-back — this posts to the
+    // local bridge's /writeback endpoint which the office's IT can configure.
+    const r = await axios.post(
+      `${config.od_api_url}/edifi/writeback`,
+      {
+        snapshot_id: snapshotId,
+        fields: {
+          eligibility_status: fields.eligibility_status,
+          individual_deductible_remaining: fields.individual_deductible_remaining,
+          annual_maximum_remaining: fields.annual_maximum_remaining,
+          benefit_year_type: fields.benefit_year_type,
+        },
+        source: 'edifi_verified',
+      },
+      { timeout: 10000 },
+    );
+
+    if (r.data?.success) {
+      written.push(...Object.keys(fields));
+      log(`[Writeback] Snapshot ${snapshotId} written OK: ${written.join(', ')}`);
+      return { success: true, fields_written: written };
+    }
+
+    log(`[Writeback] Snapshot ${snapshotId} OD returned failure: ${JSON.stringify(r.data)}`);
+    return { success: false, fields_written: [] };
+  } catch (err) {
+    // 404 = endpoint not yet configured on this office's OD bridge — non-fatal
+    if (err.response?.status === 404) {
+      log(`[Writeback] OD writeback endpoint not available for this office (404) — skipping`);
+      return { success: false, fields_written: [] };
+    }
+    throw err;
+  }
+}
+
 async function handleScrape(req) {
   const {
     scrape_id,
@@ -304,12 +388,485 @@ async function handleScrape(req) {
 }
 
 async function performEligibilityScrape(page, payerCode, patientInfo) {
-  // Placeholder — actual portal navigation goes here per-carrier
-  // With a live authenticated session, just navigate to eligibility search
-  return {
-    benefits: [],
-    note: "Session-based scrape — carrier-specific navigation needed",
-  };
+  const { member_id, subscriber_dob, subscriber_last_name } = patientInfo;
+
+  // Convert YYYY-MM-DD → MM/DD/YYYY for portal forms
+  function fmtDob(dob) {
+    if (!dob) return "";
+    const m = dob.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? `${m[2]}/${m[3]}/${m[1]}` : dob;
+  }
+
+  const dob = fmtDob(subscriber_dob);
+
+  // Fill a form field by trying multiple selector strategies in order
+  async function fillField(pg, selectors, value) {
+    for (const sel of selectors) {
+      try {
+        const el = await pg.$(sel);
+        if (el) {
+          await el.fill(value);
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  // Click a button by trying multiple selector strategies
+  async function clickButton(pg, selectors) {
+    for (const sel of selectors) {
+      try {
+        const el = await pg.$(sel);
+        if (el) {
+          await el.click();
+          return true;
+        }
+      } catch {}
+    }
+    return false;
+  }
+
+  // Parse benefit rows out of a results container
+  // Looks for table rows or definition lists containing coverage category keywords
+  function parseBenefitRows(html) {
+    const benefits = [];
+    const categoryPatterns = [
+      { key: "PREVENTIVE", rx: /preventive|prev\b/i },
+      { key: "BASIC", rx: /basic|restorative/i },
+      { key: "MAJOR", rx: /major/i },
+      { key: "ENDODONTIC", rx: /endo/i },
+      { key: "PERIODONTIC", rx: /perio/i },
+      { key: "ORAL_SURGERY", rx: /oral\s*surg/i },
+      { key: "ORTHODONTIC", rx: /ortho/i },
+    ];
+    const pctRx = /(\d{1,3})\s*%/g;
+    const freqRx = /(\d+)\s*x\s*(\/\s*(yr|year|per\s*year))/i;
+
+    // Split on <tr or common block boundaries to isolate rows
+    const rows = html.split(/<tr[\s>]|<div[\s>]|<li[\s>]/i);
+    for (const row of rows) {
+      for (const cat of categoryPatterns) {
+        if (!cat.rx.test(row)) continue;
+        const pcts = [...row.matchAll(pctRx)].map((m) => parseInt(m[1], 10));
+        if (pcts.length === 0) continue;
+        const freqMatch = row.match(freqRx);
+        benefits.push({
+          category: cat.key,
+          coinsurance_pct: pcts[0],
+          frequency: freqMatch ? freqMatch[0].trim() : null,
+          in_network: true,
+        });
+        break;
+      }
+    }
+    return benefits;
+  }
+
+  // Capture the best available html snapshot from results area
+  async function captureSnapshot(pg) {
+    return pg
+      .$eval(
+        [
+          ".results", ".eligibility-results", "#results", "#eligibilityResults",
+          ".benefits-summary", "#benefitsSummary", ".benefit-details",
+          "#content", "main", "body",
+        ].join(", "),
+        (el) => el.innerHTML,
+      )
+      .catch(() => "");
+  }
+
+  try {
+    let html_snapshot = "";
+    let benefits = [];
+
+    if (payerCode === "DOT") {
+      await page.goto("https://www.dentalofficetoolkit.com/dot-ui/", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      // Navigate to eligibility section
+      await clickButton(page, [
+        'a[href*="eligibility"]',
+        'a:has-text("Eligibility")',
+        'a:has-text("Elig Check")',
+        'nav a:has-text("Elig")',
+        'button:has-text("Eligibility")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      // Fill member lookup form
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
+        'input[aria-label*="member" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="mm/dd" i]', 'input[id*="dob" i]',
+        'input[aria-label*="birth" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+          'input[id*="lastName" i]', 'input[aria-label*="last name" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'input[type="submit"]',
+        'button:has-text("Search")', 'button:has-text("Check")',
+        'button:has-text("Verify")', 'button:has-text("Submit")',
+      ]);
+      await page.waitForSelector(
+        '.results, table.benefits, .eligibility-result, #eligibilityResults',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "DDIC") {
+      await page.goto("https://www1.deltadentalins.com/ciam/login", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await page.waitForLoadState("networkidle").catch(() => {});
+      // Session should redirect to portal — navigate to eligibility
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")', 'button:has-text("Eligibility")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[name*="id" i]', 'input[placeholder*="member" i]',
+        'input[id*="memberId" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]', 'input[id*="dob" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[id*="last" i]',
+          'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'input[type="submit"]',
+        'button:has-text("Search")', 'button:has-text("Check Eligibility")',
+        'button:has-text("Submit")',
+      ]);
+      await page.waitForSelector(
+        '.benefits, table, .eligibility, #results, .plan-details',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "DDCA") {
+      await page.goto("https://dentist.deltadental.com", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, table, .results, #eligibilityResults',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "METLIFE") {
+      await page.goto("https://dental.provider.metlife.com", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="patient" i]',
+        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]', 'input[id*="dob" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[id*="lastName" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Check Eligibility")',
+        'button:has-text("Search")', 'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, .eligibility-summary, table, #content',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "CIGNA") {
+      await page.goto("https://cignaforhcp.cigna.com", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Coverage")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="id" i]',
+        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'button:has-text("Find")', 'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, .coverage-details, table, #eligibility-results',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "GUARDIAN") {
+      await page.goto("https://www.guardianlife.com/dental/dentists", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")', 'button:has-text("Eligibility")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]', 'input[id*="member" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'button:has-text("Check")', 'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, .eligibility, table, .plan-summary',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "UHC") {
+      await page.goto("https://www.uhcprovider.com", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="id" i]',
+        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, .eligibility, table, #results',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "SELECTHEALTH") {
+      await page.goto("https://providers.selecthealth.org", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, table, .eligibility, #content',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "EMIHEALTH") {
+      await page.goto("https://www.emihealth.com", {
+        waitUntil: "networkidle",
+        timeout: 30000,
+      });
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Provider")', 'a:has-text("Benefits")',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, table, .eligibility, #content',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else if (payerCode === "AETNA") {
+      await page.goto(
+        "https://www.aetna.com/health-care-professionals.html",
+        { waitUntil: "networkidle", timeout: 30000 },
+      );
+      await clickButton(page, [
+        'a[href*="eligib" i]', 'a:has-text("Eligibility")',
+        'a:has-text("Benefits")', 'a:has-text("NaviNet")',
+        'a[href*="navinet" i]',
+      ]);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await fillField(page, [
+        'input[name*="member" i]', 'input[name*="subscriber" i]',
+        'input[placeholder*="member" i]', 'input[id*="memberId" i]',
+      ], member_id);
+      await fillField(page, [
+        'input[name*="dob" i]', 'input[name*="birth" i]',
+        'input[placeholder*="date" i]',
+      ], dob);
+      if (subscriber_last_name) {
+        await fillField(page, [
+          'input[name*="last" i]', 'input[placeholder*="last" i]',
+        ], subscriber_last_name);
+      }
+      await clickButton(page, [
+        'button[type="submit"]', 'button:has-text("Search")',
+        'button:has-text("Check")', 'input[type="submit"]',
+      ]);
+      await page.waitForSelector(
+        '.benefits, .eligibility, table, #eligibility-result',
+        { timeout: 20000 },
+      ).catch(() => {});
+      html_snapshot = await captureSnapshot(page);
+      benefits = parseBenefitRows(html_snapshot);
+    }
+
+    else {
+      // Unknown payer — capture whatever is on the page
+      html_snapshot = await captureSnapshot(page);
+    }
+
+    return {
+      benefits,
+      html_snapshot,
+      source: "bridge_portal",
+      payer_code: payerCode,
+    };
+  } catch (err) {
+    log(`[Scrape] performEligibilityScrape error (${payerCode}): ${err.message}`);
+    return {
+      benefits: [],
+      html_snapshot: "",
+      source: "bridge_portal_error",
+      error: err.message,
+      payer_code: payerCode,
+    };
+  }
 }
 
 // ─── Express Local Server ─────────────────────────────────────────────────────
