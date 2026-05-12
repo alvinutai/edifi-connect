@@ -36,11 +36,14 @@ function log(msg) {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+const OD_DEV_KEY = "3TOLoPsbpxo8lxBi";
+
 let config = {
   office_id: null,
   api_key: null,
   registered: false,
   od_api_url: null,
+  od_customer_key: null,
 };
 
 function loadConfig() {
@@ -207,16 +210,29 @@ function connectTunnel() {
 
 // ─── Open Dental Sync ─────────────────────────────────────────────────────────
 
+function odAuthHeader() {
+  if (config.od_customer_key) {
+    return { Authorization: `ODFHIR ${OD_DEV_KEY} ${config.od_customer_key}` };
+  }
+  return {};
+}
+
 async function odGet(path) {
   const base = config.od_api_url;
   if (!base) return null;
   try {
     const axios = require("axios");
-    const r = await axios.get(`${base}${path}`, { timeout: 8000 });
+    const r = await axios.get(`${base}${path}`, {
+      timeout: 8000,
+      headers: odAuthHeader(),
+    });
     return r.data;
   } catch (e) {
-    // 404 means record not found — expected for some patients
     if (e.response?.status === 404) return null;
+    if (e.response?.status === 401) {
+      log(`[OD] Auth failed — check OD customer key in settings`);
+      return null;
+    }
     log(`[OD] GET ${path} failed: ${e.message}`);
     return null;
   }
@@ -1204,6 +1220,11 @@ function updateTray() {
       visible: !config.registered,
     },
     {
+      label: "Enter OD Customer Key",
+      click: showSetupWindow,
+      visible: config.registered && !config.od_customer_key,
+    },
+    {
       label: "Open EDiFi Dashboard",
       click: () =>
         shell.openExternal("https://edifi-eligibility-platform.netlify.app"),
@@ -1283,29 +1304,42 @@ ipcMain.handle("detect-od", async () => {
   return await detectOpenDental();
 });
 
-ipcMain.handle("register", async (_, { officeCode, odApiUrl }) => {
-  const code = officeCode?.trim();
-  if (!code || code.length < 8) {
-    return { ok: false, error: "Please enter a valid Office Code." };
-  }
-  config = {
-    ...config,
-    office_id: code,
-    od_api_url: odApiUrl?.trim() || null,
-    registered: true,
-  };
-  saveConfig();
-  connectTunnel();
-  updateTray();
-  log(`Office registered: ${code.slice(0, 8)}...`);
-  return { ok: true };
-});
+ipcMain.handle(
+  "register",
+  async (_, { officeCode, odApiUrl, odCustomerKey }) => {
+    const code = officeCode?.trim();
+    if (!code || code.length < 8) {
+      return { ok: false, error: "Please enter a valid Office Code." };
+    }
+    config = {
+      ...config,
+      office_id: code,
+      od_api_url: odApiUrl?.trim() || null,
+      od_customer_key: odCustomerKey?.trim() || config.od_customer_key || null,
+      registered: true,
+    };
+    saveConfig();
+    connectTunnel();
+    updateTray();
+    log(
+      `Office registered: ${code.slice(0, 8)}...${config.od_customer_key ? " (OD key set)" : " (no OD key)"}`,
+    );
+    return { ok: true };
+  },
+);
 
 ipcMain.handle("get-status", () => ({
   registered: config.registered,
   office_id: config.office_id,
   tunnel_connected: tunnelOk,
   sessions: activeSessions().length,
+}));
+
+ipcMain.handle("get-config", () => ({
+  office_id: config.office_id,
+  od_api_url: config.od_api_url,
+  od_customer_key_set: !!config.od_customer_key,
+  registered: config.registered,
 }));
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
