@@ -14,6 +14,7 @@ const express = require("express");
 const cors = require("cors");
 const { WebSocket, WebSocketServer } = require("ws");
 const { detectOpenDental } = require("./od-detect");
+const { isAvailable: isMysqlAvailable, getBenefitsForPatient } = require("./od-mysql");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -296,10 +297,23 @@ async function syncODData() {
               }
             }
 
+            // Query OD MySQL directly for complete benefit data (coinsurance %, deductibles).
+            // Works without Customer Key — reads local OD database via FreeDentalConfig.xml.
+            // Silently skips if MySQL isn't accessible (no OD install found).
+            let benefits = [];
+            try {
+              if (await isMysqlAvailable()) {
+                benefits = await getBenefitsForPatient(apt.PatNum);
+              }
+            } catch {
+              benefits = [];
+            }
+
             return {
               ...apt,
               patient,
               insurance: { patPlans, insSubs, insPlans, carriers },
+              benefits,
             };
           } catch (e) {
             log(`[OD Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
