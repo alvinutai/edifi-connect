@@ -14,7 +14,15 @@ const express = require("express");
 const cors = require("cors");
 const { WebSocket, WebSocketServer } = require("ws");
 const { detectOpenDental } = require("./od-detect");
-const { isAvailable: isMysqlAvailable, getBenefitsForPatient } = require("./od-mysql");
+const {
+  isAvailable: isMysqlAvailable,
+  getBenefitsForPatient,
+  getPatNumByNameDOB,
+  getAppointmentsToday,
+  getPatientInsuranceSnapshot,
+  setLogger: setMysqlLogger,
+} = require("./od-mysql");
+const { autoUpdater } = require("electron-updater");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -96,6 +104,144 @@ function activeSessions() {
   return [...sessions.values()].filter((s) => now - s.at < SESSION_TTL);
 }
 
+// ─── Built-in Portal Windows (no Chrome extension needed) ────────────────────
+
+const PORTALS = [
+  {
+    payerCode: "DDIC",
+    payerName: "Delta Dental",
+    url: "https://www.deltadentalins.com/dental-professionals/login.html",
+    partition: "persist:ddic",
+    cookieUrl: "https://www.deltadentalins.com",
+    domain: "deltadentalins.com",
+  },
+  {
+    payerCode: "SELECTHEALTH",
+    payerName: "SelectHealth",
+    url: "https://selecthealth.org/providers",
+    partition: "persist:selecthealth",
+    cookieUrl: "https://selecthealth.org",
+    domain: "selecthealth.org",
+  },
+  {
+    payerCode: "EMIHEALTH",
+    payerName: "EMI Health",
+    url: "https://www.emihealth.com/providers",
+    partition: "persist:emihealth",
+    cookieUrl: "https://www.emihealth.com",
+    domain: "emihealth.com",
+  },
+];
+
+async function checkPartitionCookies(portal) {
+  const { session: electronSession } = require("electron");
+  const s = electronSession.fromPartition(portal.partition);
+  const cookies = await s.cookies.get({ url: portal.cookieUrl });
+  const sessionCookies = cookies.filter(
+    (c) =>
+      c.httpOnly ||
+      c.name.toLowerCase().includes("session") ||
+      c.name.toLowerCase().includes("token") ||
+      c.name.toLowerCase().includes("auth") ||
+      c.name.toLowerCase().includes("jsessionid") ||
+      c.name.toLowerCase().includes("sid"),
+  );
+  return sessionCookies.length > 0 ? cookies : null;
+}
+
+function announceSessions() {
+  if (!tunnelOk || !tunnel) return;
+  const active = activeSessions();
+  if (active.length === 0) return;
+  tunnel.send(
+    JSON.stringify({
+      type: "SESSIONS_AVAILABLE",
+      count: active.length,
+      payers: active.map((s) => s.payerCode),
+    }),
+  );
+  log(`[Portal] Announced ${active.length} active session(s): ${active.map((s) => s.payerCode).join(", ")}`);
+}
+
+async function loadSavedPortalSessions() {
+  if (!config.office_id) return;
+  let restored = 0;
+  for (const portal of PORTALS) {
+    const cookies = await checkPartitionCookies(portal);
+    if (cookies) {
+      storeSession(
+        config.office_id,
+        portal.payerCode,
+        cookies.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          sameSite: c.sameSite,
+          expirationDate: c.expirationDate,
+        })),
+      );
+      log(`[Portal] Restored saved session: ${portal.payerName}`);
+      restored++;
+    }
+  }
+  if (restored > 0) announceSessions();
+}
+
+let portalWindows = {};
+
+function openPortalWindow(portal) {
+  if (portalWindows[portal.payerCode]) {
+    portalWindows[portal.payerCode].focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 750,
+    title: `EDiFi — Connect ${portal.payerName}`,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      partition: portal.partition,
+    },
+  });
+
+  portalWindows[portal.payerCode] = win;
+  win.loadURL(portal.url);
+
+  const checkAndCapture = async () => {
+    const cookies = await checkPartitionCookies(portal);
+    if (!cookies) return;
+    log(`[Portal] Session captured: ${portal.payerName} (${cookies.length} cookies)`);
+    storeSession(
+      config.office_id,
+      portal.payerCode,
+      cookies.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        httpOnly: c.httpOnly,
+        sameSite: c.sameSite,
+        expirationDate: c.expirationDate,
+      })),
+    );
+    announceSessions();
+    updateTray();
+    win.close();
+  };
+
+  win.webContents.on("did-navigate", checkAndCapture);
+  win.webContents.on("did-finish-load", checkAndCapture);
+  win.on("closed", () => {
+    delete portalWindows[portal.payerCode];
+  });
+}
+
 // ─── Tunnel to EDiFi Cloud ────────────────────────────────────────────────────
 
 let tunnel = null;
@@ -118,21 +264,22 @@ function connectTunnel() {
     tunnelOk = true;
     log("Tunnel connected to EDiFi Cloud");
     updateTray();
-    // Announce available sessions
-    const active = activeSessions();
-    if (active.length > 0) {
-      tunnel.send(
-        JSON.stringify({
-          type: "SESSIONS_AVAILABLE",
-          count: active.length,
-          payers: active.map((s) => s.payerCode),
-        }),
-      );
+    // Restore sessions saved from previous portal logins, then announce
+    loadSavedPortalSessions().then(() => {
+      // Also announce any sessions already in memory from this run
+      announceSessions();
+    });
+    // Start OD sync immediately then every 15 minutes.
+    // If OD Web Service (od_api_url) is not configured, fall back to direct MySQL sync.
+    if (config.od_api_url) {
+      syncODData();
+      if (odSyncInterval) clearInterval(odSyncInterval);
+      odSyncInterval = setInterval(syncODData, 15 * 60 * 1000);
+    } else {
+      syncODMySql();
+      if (odSyncInterval) clearInterval(odSyncInterval);
+      odSyncInterval = setInterval(syncODMySql, 15 * 60 * 1000);
     }
-    // Start OD sync immediately then every 15 minutes
-    syncODData();
-    if (odSyncInterval) clearInterval(odSyncInterval);
-    odSyncInterval = setInterval(syncODData, 15 * 60 * 1000);
   });
 
   tunnel.on("message", async (data) => {
@@ -146,6 +293,53 @@ function connectTunnel() {
       if (msg.type === "SCRAPE_REQUEST") {
         const result = await handleScrape(msg);
         tunnel.send(JSON.stringify({ type: "SCRAPE_RESULT", ...result }));
+      }
+      // SESSION_REQUEST — server asks for raw portal cookies for server-side scraping.
+      // Safer than Playwright on the office machine: browser runs on Railway + proxy.
+      if (msg.type === "SESSION_REQUEST") {
+        const session = getSession(config.office_id, msg.payer_code);
+        log(`[SESSION_REQUEST] ${msg.payer_code}: ${session ? session.cookies.length + ' cookies' : 'no session'}`);
+        tunnel.send(JSON.stringify({
+          type: "SESSION_RESPONSE",
+          scrape_id: msg.scrape_id,
+          payer_code: msg.payer_code,
+          cookies: session?.cookies ?? [],
+        }));
+      }
+      // OD_BENEFIT_REQUEST — server asks for OD benefit data for a specific patient.
+      // Looks up PatNum by name+DOB, returns full insurance snapshot from MySQL.
+      if (msg.type === "OD_BENEFIT_REQUEST") {
+        const { scrape_id, first_name, last_name, birth_date, pat_num } = msg;
+        log(`[OD Benefit] Request for ${first_name} ${last_name} (${birth_date || pat_num})`);
+        try {
+          const resolvedPatNum = pat_num || (await getPatNumByNameDOB(first_name, last_name, birth_date));
+          if (!resolvedPatNum) {
+            tunnel.send(JSON.stringify({
+              type: "OD_BENEFIT_RESPONSE",
+              scrape_id,
+              found: false,
+              reason: "patient_not_found",
+            }));
+          } else {
+            const snapshot = await getPatientInsuranceSnapshot(resolvedPatNum);
+            tunnel.send(JSON.stringify({
+              type: "OD_BENEFIT_RESPONSE",
+              scrape_id,
+              found: true,
+              pat_num: resolvedPatNum,
+              ...snapshot,
+            }));
+            log(`[OD Benefit] Sent snapshot for PatNum ${resolvedPatNum}: ${snapshot?.benefits?.length ?? 0} benefits`);
+          }
+        } catch (e) {
+          log(`[OD Benefit] Error: ${e.message}`);
+          tunnel.send(JSON.stringify({
+            type: "OD_BENEFIT_RESPONSE",
+            scrape_id,
+            found: false,
+            reason: e.message,
+          }));
+        }
       }
       if (msg.type === "OD_PUSH_ACK") {
         log(
@@ -239,6 +433,80 @@ async function odGet(path) {
   }
 }
 
+// Maps raw OD REST API /insbenefits entries to EDiFi benefit format.
+// OD BenefitType 6 = CoInsurance (plan pays X%), 4 = Deductible, 1 = Frequency.
+// CovCatNum default mapping assumes standard OD category sequence.
+let odCovCatCache = null; // { catNum: 'PREVENTIVE', ... }
+
+async function getOdCovCats() {
+  if (odCovCatCache) return odCovCatCache;
+  // Default OD categories — used when /covcat endpoint unavailable
+  const defaults = {
+    1: 'DIAGNOSTIC', 2: 'PREVENTIVE', 3: 'BASIC', 4: 'ENDODONTIC',
+    5: 'PERIODONTIC', 6: 'ORAL_SURGERY', 7: 'PROSTHODONTIA', 8: 'IMPLANT',
+    9: 'ORTHODONTIC', 10: 'PREVENTIVE', 11: 'GENERAL', 12: 'MAJOR',
+    13: 'PROSTHODONTIA', 14: 'PROSTHODONTIA',
+  };
+  try {
+    const cats = await odGet('/covcat');
+    if (Array.isArray(cats) && cats.length > 0) {
+      const map = {};
+      for (const c of cats) {
+        // Map EbenefitCat to category code; fall back to description-based detection
+        const desc = (c.Description || '').toUpperCase();
+        let cat = 'GENERAL';
+        if (desc.includes('PREVENT')) cat = 'PREVENTIVE';
+        else if (desc.includes('BASIC') || desc.includes('RESTOR')) cat = 'BASIC';
+        else if (desc.includes('MAJOR')) cat = 'MAJOR';
+        else if (desc.includes('ENDO')) cat = 'ENDODONTIC';
+        else if (desc.includes('PERIO')) cat = 'PERIODONTIC';
+        else if (desc.includes('ORAL') || desc.includes('SURGERY')) cat = 'ORAL_SURGERY';
+        else if (desc.includes('ORTHO')) cat = 'ORTHODONTIC';
+        else if (desc.includes('IMPLANT')) cat = 'IMPLANT';
+        else if (desc.includes('PROSTHO') || desc.includes('CROWN') || desc.includes('BRIDGE')) cat = 'PROSTHODONTIA';
+        else if (desc.includes('DIAGN')) cat = 'DIAGNOSTIC';
+        map[c.CovCatNum] = cat;
+      }
+      odCovCatCache = map;
+      return map;
+    }
+  } catch {}
+  odCovCatCache = defaults;
+  return defaults;
+}
+
+function mapOdApiBenefits(rawBenefits) {
+  const BEN_TYPE = { 1: 'Frequency', 3: 'Copay', 4: 'Deductible', 6: 'CoInsurance' };
+  const COV_LEVEL = { 0: 'None', 1: 'Individual', 2: 'Family' };
+  const TIME_PERIOD = {
+    0: 'None', 1: 'ServiceYear', 2: 'CalendarYear', 3: 'Lifetime',
+    4: 'Years2', 5: 'Years3', 8: 'Months6', 12: 'Months24',
+  };
+  // Use cached covcat if available, else default numeric mapping
+  const catMap = odCovCatCache || {
+    1: 'DIAGNOSTIC', 2: 'PREVENTIVE', 3: 'BASIC', 4: 'ENDODONTIC',
+    5: 'PERIODONTIC', 6: 'ORAL_SURGERY', 7: 'PROSTHODONTIA', 8: 'IMPLANT',
+    9: 'ORTHODONTIC', 10: 'PREVENTIVE', 11: 'GENERAL', 12: 'MAJOR',
+  };
+
+  const results = [];
+  for (const b of rawBenefits) {
+    const type = BEN_TYPE[b.BenefitType];
+    if (!type) continue;
+    const category = catMap[b.CovCatNum] || 'GENERAL';
+    const coverage_level = COV_LEVEL[b.CoverageLevel] || 'None';
+    const entry = { type, category, coverage_level };
+    if (type === 'CoInsurance') entry.percent = Number(b.Percent);
+    else if (type === 'Deductible') entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
+    else if (type === 'Frequency') {
+      entry.quantity = b.Quantity;
+      entry.period = TIME_PERIOD[b.TimePeriod] || 'None';
+    }
+    results.push(entry);
+  }
+  return results.filter(b => b.type === 'CoInsurance' ? b.percent > 0 : true);
+}
+
 async function syncODData() {
   if (!config.od_api_url || !config.office_id) return;
   if (!tunnelOk || !tunnel) {
@@ -264,6 +532,9 @@ async function syncODData() {
     log(
       `[OD Sync] ${scheduled.length} scheduled appointments — fetching patient data...`,
     );
+
+    // Pre-warm coverage category cache so benefit mapping is accurate
+    await getOdCovCats();
 
     // 2. For each appointment, fetch patient + insurance (batch of 3)
     const enriched = [];
@@ -297,16 +568,40 @@ async function syncODData() {
               }
             }
 
-            // Query OD MySQL directly for complete benefit data (coinsurance %, deductibles).
-            // Works without Customer Key — reads local OD database via FreeDentalConfig.xml.
-            // Silently skips if MySQL isn't accessible (no OD install found).
+            // Pull benefit data (coinsurance %, deductibles, frequencies) from OD.
+            // Source priority: OD REST API → OD MySQL → empty
+            // OD REST API is preferred because it reflects what staff entered in OD directly.
             let benefits = [];
-            try {
-              if (await isMysqlAvailable()) {
-                benefits = await getBenefitsForPatient(apt.PatNum);
+            const primarySub = insSubs[0];
+            const primaryPlan = insPlans[0];
+
+            // Source 1: OD REST API /insbenefits — reads the benefit table directly
+            if (primaryPlan?.PlanNum) {
+              try {
+                const rawBenefits = await odGet(`/insbenefits?InsPlanNum=${primaryPlan.PlanNum}`);
+                if (Array.isArray(rawBenefits) && rawBenefits.length > 0) {
+                  benefits = mapOdApiBenefits(rawBenefits);
+                  if (benefits.length > 0) {
+                    log(`[OD Benefits] ${benefits.length} benefits from REST API for PatNum ${apt.PatNum} (Plan ${primaryPlan.PlanNum})`);
+                  }
+                }
+              } catch (e) {
+                log(`[OD Benefits] REST API failed for PatNum ${apt.PatNum}: ${e.message}`);
               }
-            } catch {
-              benefits = [];
+            }
+
+            // Source 2: OD MySQL fallback — direct database read when REST API unavailable
+            if (benefits.length === 0) {
+              try {
+                if (await isMysqlAvailable()) {
+                  benefits = await getBenefitsForPatient(apt.PatNum);
+                  if (benefits.length > 0) {
+                    log(`[OD MySQL] ${benefits.length} benefits for PatNum ${apt.PatNum}`);
+                  }
+                }
+              } catch (e) {
+                log(`[OD MySQL] benefit query error for PatNum ${apt.PatNum}: ${e.message}`);
+              }
             }
 
             return {
@@ -342,6 +637,74 @@ async function syncODData() {
     );
   } catch (e) {
     log(`[OD Sync] Error: ${e.message}`);
+  }
+}
+
+// ─── OD MySQL-Only Sync ───────────────────────────────────────────────────────
+// Runs when od_api_url is not configured (OD Web Service not set up).
+// Reads today's appointments and patient insurance directly from MySQL,
+// then pushes to EDiFi Cloud so benefit breakdowns are populated without REST API.
+
+async function syncODMySql() {
+  if (!tunnelOk || !tunnel) {
+    log("[OD MySQL Sync] Skipped — tunnel not connected");
+    return;
+  }
+  if (!(await isMysqlAvailable())) {
+    log("[OD MySQL Sync] MySQL not available — skipping");
+    return;
+  }
+
+  log("[OD MySQL Sync] Starting direct MySQL sync...");
+  try {
+    const apts = await getAppointmentsToday();
+    if (apts.length === 0) {
+      log("[OD MySQL Sync] No scheduled appointments today");
+      return;
+    }
+
+    log(`[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`);
+    const enriched = [];
+    for (const apt of apts) {
+      try {
+        const snapshot = await getPatientInsuranceSnapshot(apt.PatNum);
+        if (!snapshot) continue;
+        enriched.push({
+          AptNum: apt.AptNum,
+          PatNum: apt.PatNum,
+          AptDateTime: apt.AptDateTime,
+          patient: {
+            FName: apt.FName,
+            LName: apt.LName,
+            Birthdate: apt.Birthdate,
+            HmPhone: apt.HmPhone,
+            WkPhone: apt.WkPhone,
+            Email: apt.Email,
+          },
+          insurance: snapshot.plans,
+          benefits: snapshot.benefits,
+          source: "od_mysql",
+        });
+      } catch (e) {
+        log(`[OD MySQL Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
+      }
+    }
+
+    if (enriched.length === 0) {
+      log("[OD MySQL Sync] No insurance data found");
+      return;
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    log(`[OD MySQL Sync] Pushing ${enriched.length} appointments to EDiFi Cloud...`);
+    tunnel.send(JSON.stringify({
+      type: "OD_DATA_PUSH",
+      date: today,
+      appointments: enriched,
+      source: "od_mysql",
+    }));
+  } catch (e) {
+    log(`[OD MySQL Sync] Error: ${e.message}`);
   }
 }
 
@@ -631,17 +994,21 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
       html_snapshot = await captureSnapshot(page);
       benefits = parseBenefitRows(html_snapshot);
     } else if (payerCode === "DDIC") {
-      await page.goto("https://www1.deltadentalins.com/ciam/login", {
+      // Navigate directly to provider portal — session cookies make this land logged-in
+      // www1.deltadentalins.com/ciam/login has DNS issues; go straight to the dashboard
+      await page.goto("https://www.deltadentalins.com/dental-professionals/", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
       await page.waitForLoadState("networkidle").catch(() => {});
-      // Session should redirect to portal — navigate to eligibility
+      // Find and click eligibility/benefits search
       await clickButton(page, [
         'a[href*="eligib" i]',
         'a:has-text("Eligibility")',
         'a:has-text("Benefits")',
+        'a:has-text("Check Eligibility")',
         'button:has-text("Eligibility")',
+        'nav a:has-text("Elig")',
       ]);
       await page.waitForLoadState("networkidle").catch(() => {});
       await fillField(
@@ -1135,15 +1502,17 @@ expressApp.get("/health", (_, res) =>
 );
 
 expressApp.post("/session", (req, res) => {
-  const { office_id, payer_code, cookies, payer_name } = req.body;
-  if (!office_id || !payer_code || !cookies?.length)
+  const { payer_code, cookies, payer_name } = req.body;
+  if (!payer_code || !cookies?.length)
     return res.status(400).json({ error: "Missing fields" });
-  storeSession(office_id, payer_code, cookies);
+  // Always use config.office_id so getSession() can find the session by the Electron app's office.
+  // Extension may send a different office_id if its popup was registered separately — ignore it.
+  storeSession(config.office_id, payer_code, cookies);
   if (tunnelOk && tunnel) {
     tunnel.send(
       JSON.stringify({
         type: "SESSION_AVAILABLE",
-        office_id,
+        office_id: config.office_id,
         payer_code,
         payer_name,
       }),
@@ -1360,6 +1729,21 @@ ipcMain.handle("get-config", () => ({
 
 app.whenReady().then(() => {
   loadConfig();
+
+  // Wire OD MySQL logger to main app log — failures now show in edifi-connect.log
+  setMysqlLogger((msg) => log(`[OD MySQL] ${msg}`));
+
+  // Silent auto-update — checks GitHub on startup, downloads + installs with no user prompt.
+  // Every future update after v2.3.0 is completely invisible to office staff.
+  try {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on("update-downloaded", () => {
+      log("[Updater] Update ready — installing silently on next quit");
+    });
+    autoUpdater.on("error", (err) => log(`[Updater] ${err.message}`));
+    autoUpdater.checkForUpdates().catch(() => {});
+  } catch {}
 
   // Offices that upgraded from v2.0.0 inherit a config without od_api_url set.
   // Default it so the OD sync fires without requiring a fresh registration.

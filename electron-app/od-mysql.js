@@ -57,6 +57,12 @@ const COVERAGE_LEVEL = { 0: 'None', 1: 'Individual', 2: 'Family' };
 let pool = null;
 let configCache = null;
 let available = null; // null = unknown, true/false = tested
+let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
+
+function setLogger(fn) { logger = fn; }
+
+// Reset availability every 5 min so transient MySQL failures don't stick permanently
+setInterval(() => { if (available === false) { available = null; pool = null; } }, 5 * 60 * 1000);
 
 // ─── Config Reader ────────────────────────────────────────────────────────────
 
@@ -82,15 +88,25 @@ async function readOdConfig() {
       const host = cfg.DatabaseServer || cfg.ComputerName || cfg.Server || 'localhost';
       const database = cfg.Database || cfg.DbName || 'opendental';
       const user = cfg.DatabaseUser || cfg.DbUser || cfg.User || 'root';
-      const password = cfg.DatabasePassword || cfg.DbPassword || cfg.Password || '';
       const port = parseInt(cfg.DatabasePort || cfg.Port || '3306', 10);
 
-      configCache = { host, database, user, password, port, configPath: cfgPath };
+      // OD commonly stores password as MySqlPassHash (hashed) — detect and log clearly
+      const rawPassword = cfg.DatabasePassword || cfg.DbPassword || cfg.Password || '';
+      const hashedPassword = cfg.MySqlPassHash || cfg.DatabasePasswordHash || '';
+      if (!rawPassword && hashedPassword) {
+        logger(`Config found at ${cfgPath} but password is hashed (MySqlPassHash) — cannot connect. Set plaintext password in OD Settings > Databases.`);
+        continue;
+      }
+
+      configCache = { host, database, user, password: rawPassword, port, configPath: cfgPath };
+      logger(`Config loaded from ${cfgPath} — host:${host} db:${database} user:${user}`);
       return configCache;
-    } catch {
+    } catch (e) {
+      logger(`Config parse error at ${cfgPath}: ${e.message}`);
       continue;
     }
   }
+  logger(`FreeDentalConfig.xml not found at any standard path — OD MySQL unavailable`);
   return null;
 }
 
@@ -119,8 +135,10 @@ async function getPool() {
     await conn.query('SELECT 1');
     conn.release();
     pool = p;
+    logger(`Connected to ${cfg.host}:${cfg.port}/${cfg.database} — benefit queries ready`);
     return pool;
-  } catch {
+  } catch (e) {
+    logger(`MySQL connection failed (${cfg.host}:${cfg.port}): ${e.message}`);
     pool = null;
     return null;
   }
@@ -214,4 +232,114 @@ async function getBenefitsForPatient(patNum) {
   }
 }
 
-module.exports = { isAvailable, readOdConfig, getBenefitsForPatient };
+// ─── Patient Lookup by Name + DOB ─────────────────────────────────────────────
+
+async function getPatNumByNameDOB(firstName, lastName, birthDate) {
+  const p = await getPool();
+  if (!p) return null;
+  try {
+    // OD stores birthdate as YYYY-MM-DD. Normalize incoming date to same format.
+    const dob = birthDate ? birthDate.toString().slice(0, 10) : null;
+    const [rows] = await p.query(
+      `SELECT PatNum FROM patient
+       WHERE LName = ? AND FName = ?
+       ${dob ? 'AND Birthdate = ?' : ''}
+       AND PatStatus = 0
+       LIMIT 1`,
+      dob ? [lastName, firstName, dob] : [lastName, firstName],
+    );
+    return rows[0]?.PatNum ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Today's Scheduled Appointments (MySQL — no REST API required) ────────────
+
+async function getAppointmentsToday() {
+  const p = await getPool();
+  if (!p) return [];
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const [rows] = await p.query(
+      `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              p.FName, p.LName, p.Birthdate,
+              p.HmPhone, p.WkPhone, p.Email
+       FROM appointment a
+       JOIN patient p ON p.PatNum = a.PatNum
+       WHERE DATE(a.AptDateTime) = ?
+         AND a.AptStatus = 1
+       ORDER BY a.AptDateTime`,
+      [today],
+    );
+    return rows;
+  } catch (e) {
+    logger(`getAppointmentsToday error: ${e.message}`);
+    return [];
+  }
+}
+
+// ─── Full Patient Insurance + Benefit Snapshot ────────────────────────────────
+
+async function getPatientInsuranceSnapshot(patNum) {
+  const p = await getPool();
+  if (!p) return null;
+  try {
+    const [planRows] = await p.query(
+      `SELECT
+         pp.Ordinal,
+         c.CarrierName,
+         c.ElectID AS PayerID,
+         ip.AnnualMax,
+         ip.Deductible,
+         isub.SubscriberID,
+         isub.DateEffective,
+         isub.DateTerm,
+         sub.FName AS SubFirst, sub.LName AS SubLast, sub.Birthdate AS SubDOB,
+         pp.Relationship
+       FROM patplan pp
+       JOIN inssub isub ON isub.InsSubNum = pp.InsSubNum
+       JOIN insplan ip ON ip.PlanNum = isub.PlanNum
+       JOIN carrier c ON c.CarrierNum = ip.CarrierNum
+       JOIN patient sub ON sub.PatNum = isub.Subscriber
+       WHERE pp.PatNum = ?
+       ORDER BY pp.Ordinal
+       LIMIT 2`,
+      [patNum],
+    );
+
+    const benefits = await getBenefitsForPatient(patNum);
+
+    return {
+      patNum,
+      plans: planRows.map((r) => ({
+        ordinal: r.Ordinal,
+        carrier_name: r.CarrierName,
+        payer_id: r.PayerID,
+        annual_max_cents: r.AnnualMax != null ? Math.round(Number(r.AnnualMax) * 100) : null,
+        deductible_cents: r.Deductible != null ? Math.round(Number(r.Deductible) * 100) : null,
+        subscriber_id: r.SubscriberID,
+        date_effective: r.DateEffective,
+        date_term: r.DateTerm,
+        subscriber_first: r.SubFirst,
+        subscriber_last: r.SubLast,
+        subscriber_dob: r.SubDOB,
+        relationship: r.Relationship,
+      })),
+      benefits,
+    };
+  } catch (e) {
+    logger(`getPatientInsuranceSnapshot error for PatNum ${patNum}: ${e.message}`);
+    return null;
+  }
+}
+
+module.exports = {
+  isAvailable,
+  readOdConfig,
+  getBenefitsForPatient,
+  getPatNumByNameDOB,
+  getAppointmentsToday,
+  getPatientInsuranceSnapshot,
+  setLogger,
+};
