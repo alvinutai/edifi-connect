@@ -23,11 +23,15 @@ const {
   setLogger: setMysqlLogger,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
+const { randomUUID, createHash } = require("crypto");
+const os = require("os");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const PORT = 47821;
 const EDIFI_CLOUD_WS = "wss://edifi-ai-eligibility-production.up.railway.app";
+// New per-session UUID — changes every time the app starts. Used for command routing.
+const AGENT_INSTANCE_ID = randomUUID();
 const EDIFI_CLOUD_HTTP =
   "https://edifi-ai-eligibility-production.up.railway.app";
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
@@ -53,7 +57,46 @@ let config = {
   registered: false,
   od_api_url: null,
   od_customer_key: null,
+  // Stable per-machine UUID — generated once and persisted. Never sent raw.
+  // Only the SHA-256 hash is transmitted to the backend via AGENT_HELLO.
+  machine_id: null,
 };
+
+// ─── Remote control state (never contains credentials or PHI) ─────────────────
+
+const update_status = {
+  checking: false,
+  available: false,
+  downloaded: false,
+  last_check_at: null,
+  last_download_at: null,
+  last_error: null,
+};
+
+const od_sync_status = {
+  available: false,
+  last_attempt_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_counts: null,
+};
+
+// ─── Hardcoded capability list ────────────────────────────────────────────────
+// This list is what the agent declares it can handle. The backend enforces
+// which of these are actually enabled via Railway environment variables.
+// Electron does NOT read Railway env vars — it is an office-local process.
+
+const AGENT_CAPABILITIES = [
+  'REPORT_STATUS',
+  'REPORT_CONFIG_STATUS',
+  'REPORT_UPDATE_STATUS',
+  'REPORT_OD_STATUS',
+  'CHECK_FOR_UPDATE',
+  'DOWNLOAD_UPDATE',
+  'SYNC_OD_NOW',
+  'RESTART_APP',
+  'QUIT_AND_INSTALL',
+];
 
 function loadConfig() {
   try {
@@ -62,6 +105,11 @@ function loadConfig() {
         ...config,
         ...JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")),
       };
+    }
+    // Generate stable machine_id if not yet set
+    if (!config.machine_id) {
+      config.machine_id = randomUUID();
+      saveConfig();
     }
   } catch (e) {
     log(`Config load error: ${e.message}`);
@@ -242,6 +290,340 @@ function openPortalWindow(portal) {
   });
 }
 
+// ─── Agent Hello ──────────────────────────────────────────────────────────────
+// Sent immediately after tunnel connects. Provides version, capabilities, and
+// safe status snapshots. No credentials, no PHI, no raw secrets.
+
+function getMachineIdHash() {
+  if (!config.machine_id) return null;
+  return createHash('sha256').update(config.machine_id).digest('hex');
+}
+
+function getSafeConfigStatus() {
+  return {
+    office_id_present: !!config.office_id,
+    od_mysql_config_present: false, // set below after mysql check
+    od_api_url_present: !!config.od_api_url,
+    portal_sessions_count: activeSessions().length,
+    has_bridge_url: !!EDIFI_CLOUD_WS,
+  };
+}
+
+async function sendAgentHello() {
+  if (!tunnel || !tunnelOk) return;
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+  od_sync_status.available = mysqlOk || !!config.od_api_url;
+  const configStatus = getSafeConfigStatus();
+  configStatus.od_mysql_config_present = mysqlOk;
+
+  const hello = {
+    type: 'AGENT_HELLO',
+    office_id: config.office_id,
+    app_version: app.getVersion(),
+    machine_id_hash: getMachineIdHash(),
+    agent_instance_id: AGENT_INSTANCE_ID,
+    os_platform: os.platform(),
+    capabilities: AGENT_CAPABILITIES,
+    started_at: new Date().toISOString(),
+    update_status: { ...update_status },
+    od_sync_status: { ...od_sync_status },
+    safe_config_status: configStatus,
+  };
+
+  tunnel.send(JSON.stringify(hello));
+  log(`[RemoteControl] AGENT_HELLO sent: v${app.getVersion()} caps=${AGENT_CAPABILITIES.length}`);
+}
+
+// ─── Remote Command Router ────────────────────────────────────────────────────
+// Handles COMMAND_REQUEST messages from the server.
+// Safety rules:
+//   - Reject unknown command types
+//   - Reject expired commands
+//   - Reject commands with wrong office_id
+//   - Send COMMAND_ACK immediately on receipt
+//   - Return COMMAND_RESULT when done
+//   - Never return credentials, tokens, PHI, or raw config values
+
+async function handleCommand(msg) {
+  const { command_id, command_type, payload, expires_at, office_id: cmdOfficeId } = msg;
+
+  // Validate required fields
+  if (!command_id || !command_type) {
+    log('[RemoteControl] Rejected command: missing command_id or command_type');
+    return;
+  }
+
+  // Validate office scope
+  if (cmdOfficeId && cmdOfficeId !== config.office_id) {
+    log(`[RemoteControl] Rejected command ${command_id}: office_id mismatch`);
+    return;
+  }
+
+  // Validate expiry
+  if (expires_at && new Date(expires_at) < new Date()) {
+    log(`[RemoteControl] Rejected command ${command_id}: expired at ${expires_at}`);
+    sendCommandResult(command_id, command_type, 'FAILED', null, 'EXPIRED', 'Command expired before delivery');
+    return;
+  }
+
+  // Validate command type is in capability list
+  if (!AGENT_CAPABILITIES.includes(command_type)) {
+    log(`[RemoteControl] Rejected unknown command type: ${command_type}`);
+    sendCommandResult(command_id, command_type, 'FAILED', null, 'UNKNOWN_COMMAND', `Command type not supported: ${command_type}`);
+    return;
+  }
+
+  // Send ACK immediately
+  sendCommandAck(command_id);
+  log(`[RemoteControl] Handling command: ${command_type} (${command_id.slice(0, 8)})`);
+
+  try {
+    switch (command_type) {
+      case 'REPORT_STATUS':
+        await handleReportStatus(command_id);
+        break;
+      case 'REPORT_CONFIG_STATUS':
+        await handleReportConfigStatus(command_id);
+        break;
+      case 'REPORT_UPDATE_STATUS':
+        await handleReportUpdateStatus(command_id);
+        break;
+      case 'REPORT_OD_STATUS':
+        await handleReportOdStatus(command_id);
+        break;
+      case 'CHECK_FOR_UPDATE':
+        await handleCheckForUpdate(command_id);
+        break;
+      case 'DOWNLOAD_UPDATE':
+        await handleDownloadUpdate(command_id);
+        break;
+      case 'SYNC_OD_NOW':
+        await handleSyncOdNow(command_id);
+        break;
+      case 'RESTART_APP':
+        await handleRestartApp(command_id);
+        break;
+      case 'QUIT_AND_INSTALL':
+        await handleQuitAndInstall(command_id);
+        break;
+      default:
+        sendCommandResult(command_id, command_type, 'FAILED', null, 'UNKNOWN_COMMAND', `Unhandled command: ${command_type}`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log(`[RemoteControl] Command error ${command_type}: ${msg}`);
+    sendCommandResult(command_id, command_type, 'FAILED', null, 'HANDLER_ERROR', msg.slice(0, 200));
+  }
+}
+
+function sendCommandAck(commandId) {
+  if (!tunnel || !tunnelOk) return;
+  tunnel.send(JSON.stringify({
+    type: 'COMMAND_ACK',
+    command_id: commandId,
+    agent_instance_id: AGENT_INSTANCE_ID,
+    received_at: new Date().toISOString(),
+  }));
+}
+
+function sendCommandResult(commandId, commandType, status, result, errorCode, errorMessage) {
+  if (!tunnel || !tunnelOk) return;
+  tunnel.send(JSON.stringify({
+    type: 'COMMAND_RESULT',
+    command_id: commandId,
+    command_type: commandType,
+    agent_instance_id: AGENT_INSTANCE_ID,
+    status,
+    result: result ?? null,
+    error_code: errorCode ?? null,
+    error_message: errorMessage ?? null,
+    completed_at: new Date().toISOString(),
+  }));
+}
+
+// ── REPORT_STATUS ─────────────────────────────────────────────────────────────
+
+async function handleReportStatus(commandId) {
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+  const result = {
+    app_version: app.getVersion(),
+    agent_instance_id: AGENT_INSTANCE_ID,
+    os_platform: os.platform(),
+    uptime_seconds: Math.floor(process.uptime()),
+    capabilities: AGENT_CAPABILITIES,
+    bridge_connected: tunnelOk,
+    update_status: { ...update_status },
+    od_sync_status: { ...od_sync_status, available: mysqlOk || !!config.od_api_url },
+    safe_config_status: { ...getSafeConfigStatus(), od_mysql_config_present: mysqlOk },
+    portal_sessions_count: activeSessions().length,
+  };
+  sendCommandResult(commandId, 'REPORT_STATUS', 'COMPLETED', result);
+}
+
+// ── REPORT_CONFIG_STATUS ──────────────────────────────────────────────────────
+// Returns BOOLEANS ONLY. No URLs, no credentials, no tokens, no connection strings.
+
+async function handleReportConfigStatus(commandId) {
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+  const result = {
+    office_id_present: !!config.office_id,
+    api_key_present: !!config.api_key,
+    od_api_url_present: !!config.od_api_url,
+    od_customer_key_present: !!config.od_customer_key,
+    od_mysql_config_present: mysqlOk,
+    machine_id_present: !!config.machine_id,
+    portal_sessions_count: activeSessions().length,
+    has_bridge_url: !!EDIFI_CLOUD_WS,
+  };
+  sendCommandResult(commandId, 'REPORT_CONFIG_STATUS', 'COMPLETED', result);
+}
+
+// ── REPORT_UPDATE_STATUS ──────────────────────────────────────────────────────
+
+async function handleReportUpdateStatus(commandId) {
+  const result = {
+    current_version: app.getVersion(),
+    ...update_status,
+  };
+  sendCommandResult(commandId, 'REPORT_UPDATE_STATUS', 'COMPLETED', result);
+}
+
+// ── REPORT_OD_STATUS ──────────────────────────────────────────────────────────
+// Returns OD sync state. No credentials, no connection strings.
+
+async function handleReportOdStatus(commandId) {
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+  const result = {
+    od_mysql_available: mysqlOk,
+    od_api_url_present: !!config.od_api_url,
+    ...od_sync_status,
+  };
+  sendCommandResult(commandId, 'REPORT_OD_STATUS', 'COMPLETED', result);
+}
+
+// ── CHECK_FOR_UPDATE ──────────────────────────────────────────────────────────
+
+async function handleCheckForUpdate(commandId) {
+  try {
+    update_status.checking = true;
+    update_status.last_check_at = new Date().toISOString();
+    update_status.last_error = null;
+    const checkResult = await autoUpdater.checkForUpdates();
+    update_status.checking = false;
+    const updateAvailable = !!checkResult?.updateInfo;
+    update_status.available = updateAvailable;
+    sendCommandResult(commandId, 'CHECK_FOR_UPDATE', 'COMPLETED', {
+      update_available: updateAvailable,
+      current_version: app.getVersion(),
+      latest_version: checkResult?.updateInfo?.version ?? null,
+    });
+  } catch (e) {
+    update_status.checking = false;
+    update_status.last_error = e.message.slice(0, 200);
+    sendCommandResult(commandId, 'CHECK_FOR_UPDATE', 'FAILED', null, 'UPDATE_CHECK_ERROR', e.message.slice(0, 200));
+  }
+}
+
+// ── DOWNLOAD_UPDATE ───────────────────────────────────────────────────────────
+
+async function handleDownloadUpdate(commandId) {
+  if (update_status.downloaded) {
+    sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'COMPLETED', {
+      already_downloaded: true,
+      current_version: app.getVersion(),
+    });
+    return;
+  }
+  if (!update_status.available) {
+    sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'FAILED', null, 'NO_UPDATE_AVAILABLE', 'No update available to download. Run CHECK_FOR_UPDATE first.');
+    return;
+  }
+  // autoDownload is true — download is already in progress or will start automatically
+  sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'COMPLETED', {
+    download_in_progress: true,
+    note: 'autoDownload is enabled; download will complete in background',
+    current_version: app.getVersion(),
+  });
+}
+
+// ── SYNC_OD_NOW ───────────────────────────────────────────────────────────────
+
+async function handleSyncOdNow(commandId) {
+  od_sync_status.last_attempt_at = new Date().toISOString();
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+
+  if (!mysqlOk && !config.od_api_url) {
+    od_sync_status.last_error = 'Neither OD MySQL nor OD Web Service is configured';
+    sendCommandResult(commandId, 'SYNC_OD_NOW', 'FAILED', null, 'OD_NOT_CONFIGURED', od_sync_status.last_error);
+    return;
+  }
+
+  try {
+    // Report STARTED before the sync begins
+    if (tunnel && tunnelOk) {
+      tunnel.send(JSON.stringify({
+        type: 'COMMAND_RESULT',
+        command_id: commandId,
+        command_type: 'SYNC_OD_NOW',
+        agent_instance_id: AGENT_INSTANCE_ID,
+        status: 'STARTED',
+        completed_at: new Date().toISOString(),
+      }));
+    }
+
+    if (mysqlOk) {
+      await syncODMySql();
+    } else {
+      await syncODData();
+    }
+
+    od_sync_status.last_success_at = new Date().toISOString();
+    od_sync_status.last_error = null;
+
+    sendCommandResult(commandId, 'SYNC_OD_NOW', 'COMPLETED', {
+      sync_method: mysqlOk ? 'od_mysql' : 'od_rest_api',
+      completed_at: od_sync_status.last_success_at,
+    });
+  } catch (e) {
+    od_sync_status.last_error = e.message.slice(0, 200);
+    sendCommandResult(commandId, 'SYNC_OD_NOW', 'FAILED', null, 'SYNC_ERROR', od_sync_status.last_error);
+  }
+}
+
+// ── RESTART_APP ───────────────────────────────────────────────────────────────
+
+async function handleRestartApp(commandId) {
+  // Send result BEFORE restarting — once app exits, tunnel drops
+  sendCommandResult(commandId, 'RESTART_APP', 'COMPLETED', {
+    restarting: true,
+    note: 'App will disconnect and reconnect with fresh session',
+  });
+  log('[RemoteControl] Restarting app on server command');
+  // Small delay so ACK and RESULT have time to transmit
+  setTimeout(() => {
+    app.relaunch();
+    app.exit(0);
+  }, 500);
+}
+
+// ── QUIT_AND_INSTALL ──────────────────────────────────────────────────────────
+
+async function handleQuitAndInstall(commandId) {
+  if (!update_status.downloaded) {
+    sendCommandResult(commandId, 'QUIT_AND_INSTALL', 'FAILED', null, 'UPDATE_NOT_DOWNLOADED', 'Update must be downloaded before installing. Run CHECK_FOR_UPDATE and wait for download to complete.');
+    return;
+  }
+  // Send result BEFORE quitting
+  sendCommandResult(commandId, 'QUIT_AND_INSTALL', 'COMPLETED', {
+    installing: true,
+    note: 'App will quit and install the downloaded update',
+  });
+  log('[RemoteControl] Quitting and installing update on server command');
+  setTimeout(() => {
+    autoUpdater.quitAndInstall(false, true);
+  }, 500);
+}
+
 // ─── Tunnel to EDiFi Cloud ────────────────────────────────────────────────────
 
 let tunnel = null;
@@ -264,6 +646,8 @@ function connectTunnel() {
     tunnelOk = true;
     log("Tunnel connected to EDiFi Cloud");
     updateTray();
+    // Send AGENT_HELLO first — backend stores version and capabilities
+    sendAgentHello().catch((e) => log(`[RemoteControl] AGENT_HELLO error: ${e.message}`));
     // Restore sessions saved from previous portal logins, then announce
     loadSavedPortalSessions().then(() => {
       // Also announce any sessions already in memory from this run
@@ -375,6 +759,13 @@ function connectTunnel() {
               }),
             );
           });
+      }
+      // COMMAND_REQUEST — server-issued remote control command.
+      // Handled by the command router which enforces all safety rules.
+      if (msg.type === "COMMAND_REQUEST") {
+        handleCommand(msg).catch((e) =>
+          log(`[RemoteControl] handleCommand error: ${e.message}`)
+        );
       }
     } catch (e) {
       log(`Tunnel message error: ${e.message}`);
@@ -655,6 +1046,7 @@ async function syncODMySql() {
     return;
   }
 
+  od_sync_status.last_attempt_at = new Date().toISOString();
   log("[OD MySQL Sync] Starting direct MySQL sync...");
   try {
     const apts = await getAppointmentsToday();
@@ -703,7 +1095,11 @@ async function syncODMySql() {
       appointments: enriched,
       source: "od_mysql",
     }));
+    od_sync_status.last_success_at = new Date().toISOString();
+    od_sync_status.last_error = null;
+    od_sync_status.last_counts = { appointments: enriched.length };
   } catch (e) {
+    od_sync_status.last_error = e.message.slice(0, 200);
     log(`[OD MySQL Sync] Error: ${e.message}`);
   }
 }
@@ -1738,10 +2134,32 @@ app.whenReady().then(() => {
   try {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on("checking-for-update", () => {
+      update_status.checking = true;
+      update_status.last_check_at = new Date().toISOString();
+    });
+    autoUpdater.on("update-available", (info) => {
+      update_status.checking = false;
+      update_status.available = true;
+    });
+    autoUpdater.on("update-not-available", () => {
+      update_status.checking = false;
+      update_status.available = false;
+    });
+    autoUpdater.on("download-progress", () => {
+      // download in progress — no-op, downloaded remains false
+    });
     autoUpdater.on("update-downloaded", () => {
+      update_status.downloaded = true;
+      update_status.last_download_at = new Date().toISOString();
+      update_status.last_error = null;
       log("[Updater] Update ready — installing silently on next quit");
     });
-    autoUpdater.on("error", (err) => log(`[Updater] ${err.message}`));
+    autoUpdater.on("error", (err) => {
+      update_status.checking = false;
+      update_status.last_error = err.message.slice(0, 200);
+      log(`[Updater] ${err.message}`);
+    });
     autoUpdater.checkForUpdates().catch(() => {});
   } catch {}
 
@@ -1773,17 +2191,21 @@ app.whenReady().then(() => {
 
   log(`EDiFi Connect started v${app.getVersion()}`);
 
-  // Silent auto-update — downloads in background, installs on next restart
+  // Second auto-update block — registers additional listeners and re-checks on app ready.
   try {
-    const { autoUpdater } = require("electron-updater");
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.on("update-downloaded", () => {
+      update_status.downloaded = true;
+      update_status.last_download_at = new Date().toISOString();
       log("[Update] New version downloaded — will install on next restart");
       updateTray();
     });
-    autoUpdater.on("error", (err) => log(`[Update] ${err.message}`));
-    autoUpdater.checkForUpdates().catch(() => {}); // Silently ignore network errors
+    autoUpdater.on("error", (err) => {
+      update_status.last_error = err.message.slice(0, 200);
+      log(`[Update] ${err.message}`);
+    });
+    autoUpdater.checkForUpdates().catch(() => {});
   } catch (e) {
     log(`[Update] electron-updater not available: ${e.message}`);
   }
