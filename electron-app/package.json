@@ -46,7 +46,8 @@
       "createStartMenuShortcut": false,
       "createDesktopShortcut": false,
       "runAfterFinish": true,
-      "installerHeaderIcon": null
+      "installerHeaderIcon": null,
+      "include": "build-assets/installer.nsh"
     },
     "files": [
       "main.js",
