@@ -10,31 +10,88 @@
  * their existing authenticated session instead.
  */
 
-const LOCAL_SERVICE_URL = 'http://localhost:47821';
+const LOCAL_SERVICE_URL = "http://localhost:47821";
 
 // Portal domains we capture sessions for, mapped to payer codes
 const PORTAL_MAP = {
-  'deltadentalins.com':        { payer: 'DDIC',       name: 'Delta Dental (DDIC)' },
-  'deltadental.com':           { payer: 'DDCA',       name: 'Delta Dental National' },
-  'dentalofficetoolkit.com':   { payer: 'DOT',        name: 'Delta Dental (DOT)' },
-  'dental.provider.metlife.com': { payer: 'METLIFE',  name: 'MetLife Dental' },
-  'planconnect.metlife.com':   { payer: 'METLIFE',    name: 'MetLife Dental' },
-  'cignaforhcp.cigna.com':     { payer: 'CIGNA',      name: 'Cigna Dental' },
-  'aetna.com':                 { payer: 'AETNA',      name: 'Aetna Dental' },
-  'uhcprovider.com':           { payer: 'UHC',        name: 'UnitedHealthcare Dental' },
-  'guardianlife.com':          { payer: 'GUARDIAN',   name: 'Guardian Dental' },
-  'selecthealth.org':          { payer: 'SELECTHEALTH', name: 'SelectHealth' },
-  'emihealth.com':             { payer: 'EMIHEALTH',  name: 'EMI Health' },
-  'deltadentalwa.com':         { payer: 'DDWA',       name: 'Delta Dental WA' },
-  'deltadentalil.com':         { payer: 'DDIL',       name: 'Delta Dental IL' },
+  // ── Delta Dental — National & Multi-State ──────────────────────────────────
+  // AL, FL, GA, LA, MS, MT, NV, TX, UT, DC
+  "deltadentalins.com": {
+    payer: "DDIC",
+    name: "Delta Dental Insurance Company",
+  },
+  // CA
+  "deltadental.com": { payer: "DDCA", name: "Delta Dental of California" },
+  "providers.deltadental.com": {
+    payer: "DDCA",
+    name: "Delta Dental of California",
+  },
+  // Dental Office Toolkit — AZ, AR, CO, ID, IA, KS, KY, MI, MN, MO, ND, NE,
+  //                          NJ, CT, NM, NC, OH, OK, OR, SC, SD, TN, VA, WI, WY
+  "dentalofficetoolkit.com": {
+    payer: "DOT",
+    name: "Delta Dental (Office Toolkit)",
+  },
+
+  // ── Delta Dental — State-Specific Portals ────────────────────────────────
+  "northeastdeltadental.com": {
+    payer: "NEDD",
+    name: "Northeast Delta Dental (ME/NH/VT)",
+  },
+  "deltadentalma.com": { payer: "DDMA", name: "Delta Dental of Massachusetts" },
+  "deltadentalpa.com": { payer: "DDPA", name: "Delta Dental of Pennsylvania" },
+  "deltadentalny.com": { payer: "DDNY", name: "Delta Dental of New York" },
+  "deltadentalwv.com": { payer: "DDWV", name: "Delta Dental of West Virginia" },
+  "deltadentalri.com": { payer: "DDRI", name: "Delta Dental of Rhode Island" },
+  "deltadentalwa.com": { payer: "DDWA", name: "Delta Dental of Washington" },
+  "deltadentalil.com": { payer: "DDIL", name: "Delta Dental of Illinois" },
+  "hawaiidentalservice.com": { payer: "HDS", name: "Hawaii Dental Service" },
+  "deltadentalaz.com": { payer: "DDAZ", name: "Delta Dental of Arizona" },
+  "deltadentalar.com": { payer: "DDAR", name: "Delta Dental of Arkansas" },
+  "deltadentalco.com": { payer: "DDCO", name: "Delta Dental of Colorado" },
+  "deltadentalid.com": { payer: "DDID", name: "Delta Dental of Idaho" },
+  "deltadentalia.com": { payer: "DDIA", name: "Delta Dental of Iowa" },
+  "deltadentalks.com": { payer: "DDKS", name: "Delta Dental of Kansas" },
+  "deltadentalky.com": { payer: "DDKY", name: "Delta Dental of Kentucky" },
+  "deltadentalmi.com": { payer: "DDMI", name: "Delta Dental of Michigan" },
+  "deltadentalmn.com": { payer: "DDMN", name: "Delta Dental of Minnesota" },
+  "deltadentalmo.com": { payer: "DDMO", name: "Delta Dental of Missouri" },
+  "deltadentalnd.com": { payer: "DDND", name: "Delta Dental of North Dakota" },
+  "deltadentaloh.com": { payer: "DDOH", name: "Delta Dental of Ohio" },
+  "deltadentalok.com": { payer: "DDOK", name: "Delta Dental of Oklahoma" },
+  "deltadentalor.com": { payer: "DDOR", name: "Delta Dental of Oregon" },
+  "deltadentalpr.com": { payer: "DDPR", name: "Delta Dental of Puerto Rico" },
+  "deltadentalsc.com": {
+    payer: "DDSC",
+    name: "Delta Dental of South Carolina",
+  },
+  "deltadentalsd.com": { payer: "DDSD", name: "Delta Dental of South Dakota" },
+  "deltadentaltn.com": { payer: "DDTN", name: "Delta Dental of Tennessee" },
+  "deltadentalva.com": { payer: "DDVA", name: "Delta Dental of Virginia" },
+  "deltadentalwi.com": { payer: "DDWI", name: "Delta Dental of Wisconsin" },
+  "deltadentalwy.com": { payer: "DDWY", name: "Delta Dental of Wyoming" },
+
+  // ── Other Carriers ────────────────────────────────────────────────────────
+  "dental.provider.metlife.com": { payer: "METLIFE", name: "MetLife Dental" },
+  "planconnect.metlife.com": { payer: "METLIFE", name: "MetLife Dental" },
+  "cignaforhcp.cigna.com": { payer: "CIGNA", name: "Cigna Dental" },
+  "aetna.com": { payer: "AETNA", name: "Aetna Dental" },
+  "uhcprovider.com": { payer: "UHC", name: "UnitedHealthcare Dental" },
+  "guardianlife.com": { payer: "GUARDIAN", name: "Guardian Dental" },
+  "selecthealth.org": { payer: "SELECTHEALTH", name: "SelectHealth" },
+  "emihealth.com": { payer: "EMIHEALTH", name: "EMI Health" },
+  "dmba.com": { payer: "DMBA", name: "DMBA Dental" },
+  "providers.dmba.com": { payer: "DMBA", name: "DMBA Dental" },
+  "principalbenefits.com": { payer: "PRINCIPAL", name: "Principal Financial" },
+  "principal.com": { payer: "PRINCIPAL", name: "Principal Financial" },
 };
 
 // Track which portals have active sessions
 const activeSessions = {};
 
 // Storage key for office registration
-const OFFICE_ID_KEY = 'edifi_office_id';
-const EDIFI_API_KEY = 'edifi_api_key';
+const OFFICE_ID_KEY = "edifi_office_id";
+const EDIFI_API_KEY = "edifi_api_key";
 
 // ─── Session Capture ──────────────────────────────────────────────────────────
 
@@ -64,13 +121,14 @@ async function capturePortalSession(tabId, url) {
   if (cookies.length === 0) return;
 
   // Check if this looks like a logged-in state (has session-type cookies)
-  const sessionCookies = cookies.filter(c =>
-    c.name.toLowerCase().includes('session') ||
-    c.name.toLowerCase().includes('token') ||
-    c.name.toLowerCase().includes('auth') ||
-    c.name.toLowerCase().includes('jsessionid') ||
-    c.name.toLowerCase().includes('sid') ||
-    c.httpOnly
+  const sessionCookies = cookies.filter(
+    (c) =>
+      c.name.toLowerCase().includes("session") ||
+      c.name.toLowerCase().includes("token") ||
+      c.name.toLowerCase().includes("auth") ||
+      c.name.toLowerCase().includes("jsessionid") ||
+      c.name.toLowerCase().includes("sid") ||
+      c.httpOnly,
   );
   if (sessionCookies.length === 0) return;
 
@@ -83,7 +141,7 @@ async function capturePortalSession(tabId, url) {
     payer_code: portal.payer,
     payer_name: portal.name,
     domain: portal.domain,
-    cookies: cookies.map(c => ({
+    cookies: cookies.map((c) => ({
       name: c.name,
       value: c.value,
       domain: c.domain,
@@ -100,8 +158,8 @@ async function capturePortalSession(tabId, url) {
   // Send to local desktop service
   try {
     const resp = await fetch(`${LOCAL_SERVICE_URL}/session`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
@@ -115,7 +173,9 @@ async function capturePortalSession(tabId, url) {
     }
   } catch {
     // Local service not running — sessions will be captured on next sync
-    console.log('[EDiFi Connect] Local service not running — session stored locally');
+    console.log(
+      "[EDiFi Connect] Local service not running — session stored locally",
+    );
     await queueSessionLocally(payload);
   }
 }
@@ -125,7 +185,7 @@ async function capturePortalSession(tabId, url) {
  * These get flushed when the service starts.
  */
 async function queueSessionLocally(session) {
-  const existing = await chrome.storage.local.get('pending_sessions');
+  const existing = await chrome.storage.local.get("pending_sessions");
   const queue = existing.pending_sessions || [];
   queue.push(session);
   // Keep only last 10 sessions per payer (don't grow unbounded)
@@ -139,9 +199,9 @@ function updateBadge() {
   const count = Object.keys(activeSessions).length;
   if (count > 0) {
     chrome.action.setBadgeText({ text: String(count) });
-    chrome.action.setBadgeBackgroundColor({ color: '#22c55e' }); // green
+    chrome.action.setBadgeBackgroundColor({ color: "#22c55e" }); // green
   } else {
-    chrome.action.setBadgeText({ text: '' });
+    chrome.action.setBadgeText({ text: "" });
   }
 }
 
@@ -149,7 +209,7 @@ function updateBadge() {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // Only capture on completed navigation to dental portals
-  if (changeInfo.status !== 'complete') return;
+  if (changeInfo.status !== "complete") return;
   if (!tab.url) return;
 
   const portal = detectPortal(tab.url);
@@ -162,7 +222,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 // ─── Flush Queued Sessions on Startup ────────────────────────────────────────
 
 async function flushPendingSessions() {
-  const stored = await chrome.storage.local.get('pending_sessions');
+  const stored = await chrome.storage.local.get("pending_sessions");
   const queue = stored.pending_sessions || [];
   if (queue.length === 0) return;
 
@@ -170,8 +230,8 @@ async function flushPendingSessions() {
   for (const session of queue) {
     try {
       const resp = await fetch(`${LOCAL_SERVICE_URL}/session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(session),
       });
       if (!resp.ok) remaining.push(session);
@@ -186,19 +246,21 @@ async function flushPendingSessions() {
 
 // Listen for registration messages from the popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'REGISTER') {
-    chrome.storage.local.set({
-      [OFFICE_ID_KEY]: message.office_id,
-      [EDIFI_API_KEY]: message.api_key,
-    }).then(() => {
-      sendResponse({ ok: true });
-      flushPendingSessions();
-    });
+  if (message.type === "REGISTER") {
+    chrome.storage.local
+      .set({
+        [OFFICE_ID_KEY]: message.office_id,
+        [EDIFI_API_KEY]: message.api_key,
+      })
+      .then(() => {
+        sendResponse({ ok: true });
+        flushPendingSessions();
+      });
     return true; // Keep channel open for async response
   }
 
-  if (message.type === 'GET_STATUS') {
-    chrome.storage.local.get([OFFICE_ID_KEY]).then(stored => {
+  if (message.type === "GET_STATUS") {
+    chrome.storage.local.get([OFFICE_ID_KEY]).then((stored) => {
       sendResponse({
         registered: !!stored[OFFICE_ID_KEY],
         office_id: stored[OFFICE_ID_KEY],

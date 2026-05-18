@@ -7,3 +7,6 @@ dist/
 *.zip
 *.log
 .edifi-connect/
+
+# Local Netlify folder
+.netlify

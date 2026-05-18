@@ -3,66 +3,96 @@
 // OD stores its MySQL credentials in FreeDentalConfig.xml. We read that file
 // automatically and connect directly to get complete benefit data.
 
-const fs = require('fs');
-const path = require('path');
+const fs = require("fs");
+const path = require("path");
 
 // Common OD installation paths on Windows
 const OD_CONFIG_PATHS = [
-  'C:\\OpenDental\\FreeDentalConfig.xml',
-  'C:\\Program Files (x86)\\Open Dental\\FreeDentalConfig.xml',
-  'C:\\Program Files\\Open Dental\\FreeDentalConfig.xml',
-  path.join(process.env.LOCALAPPDATA || '', 'OpenDental', 'FreeDentalConfig.xml'),
-  path.join(process.env.APPDATA || '', 'OpenDental', 'FreeDentalConfig.xml'),
+  "C:\\OpenDental\\FreeDentalConfig.xml",
+  "C:\\Program Files (x86)\\Open Dental\\FreeDentalConfig.xml",
+  "C:\\Program Files\\Open Dental\\FreeDentalConfig.xml",
+  path.join(
+    process.env.LOCALAPPDATA || "",
+    "OpenDental",
+    "FreeDentalConfig.xml",
+  ),
+  path.join(process.env.APPDATA || "", "OpenDental", "FreeDentalConfig.xml"),
 ];
 
-// BenefitType values in OD benefit table
+// OD BenefitType enum (Open Dental source: EnumBenefitType)
+// Percent field = what the PLAN pays (e.g. 100 = fully covered, 80 = plan pays 80%)
 const BENEFIT_TYPE = {
-  1: 'Frequency',
-  2: 'Age',
-  3: 'Copay',
-  4: 'Deductible',
-  5: 'FixedAmount',
-  6: 'CoInsurance',
+  1: "CoInsurance", // Plan pays Percent% of the procedure
+  2: "Deductible", // MonetaryAmt = deductible amount
+  3: "Limitations", // Annual max (MonetaryAmt) or frequency rules (Quantity + QuantityQualifier)
+  4: "Other",
+  5: "Note",
 };
 
-// EbenefitCat → EDiFi coverage category
+// OD EbenefitCat → EDiFi coverage category
+// Mapping aligned with Tessina feedback (2026-05-06):
+//   Restorative (3) → BASIC, Crowns (9) → MAJOR, Prosthodontics (8) → MAJOR
 const CATEGORY_MAP = {
-  1: 'DIAGNOSTIC',
-  2: 'PREVENTIVE',
-  3: 'BASIC',           // Restorative
-  4: 'ENDODONTIC',
-  5: 'PERIODONTIC',
-  6: 'ORAL_SURGERY',
-  7: 'PROSTHODONTIA',
-  8: 'IMPLANT',
-  9: 'ORTHODONTIC',
-  10: 'PREVENTIVE',     // WellBaby — same bucket
-  11: 'GENERAL',
-  12: 'MAJOR',          // Major Restorative
-  13: 'PROSTHODONTIA',
-  14: 'PROSTHODONTIA',
+  0: "GENERAL",
+  1: "DIAGNOSTIC",
+  2: "PREVENTIVE",
+  3: "BASIC", // Restorative → Basic
+  4: "ENDO",
+  5: "PERIO",
+  6: "ORAL_SURGERY",
+  7: "MAXILLOFACIAL",
+  8: "MAJOR", // Prosthodontics → Major
+  9: "MAJOR", // Crowns → Major
+  10: "ACCIDENT",
+  11: "ORTHO",
+  12: "ADJUNCTIVE",
+  13: "IMPLANTS",
 };
 
 // TimePeriod → readable label
 const TIME_PERIOD = {
-  0: 'None', 1: 'ServiceYear', 2: 'CalendarYear', 3: 'Lifetime',
-  4: 'Years2', 5: 'Years3', 6: 'Years4', 7: 'Years5',
-  8: 'Months6', 9: 'Months4', 10: 'Months3', 11: 'Months18',
-  12: 'Months24', 13: 'Months36', 14: 'Months48', 15: 'Months60',
+  0: "None",
+  1: "ServiceYear",
+  2: "CalendarYear",
+  3: "Lifetime",
+  4: "Years2",
+  5: "Years3",
+  6: "Years4",
+  7: "Years5",
+  8: "Months6",
+  9: "Months4",
+  10: "Months3",
+  11: "Months18",
+  12: "Months24",
+  13: "Months36",
+  14: "Months48",
+  15: "Months60",
 };
 
-// CoverageLevel → label
-const COVERAGE_LEVEL = { 0: 'None', 1: 'Individual', 2: 'Family' };
+// OD CoverageLevel enum — note: Family = 3 (not 2)
+const COVERAGE_LEVEL = { 0: "None", 1: "Individual", 3: "Family" };
 
 let pool = null;
 let configCache = null;
+let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
 let available = null; // null = unknown, true/false = tested
 let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
 
-function setLogger(fn) { logger = fn; }
+function setLogger(fn) {
+  logger = fn;
+}
 
 // Reset availability every 5 min so transient MySQL failures don't stick permanently
-setInterval(() => { if (available === false) { available = null; pool = null; } }, 5 * 60 * 1000);
+setInterval(
+  () => {
+    if (available === false) {
+      available = null;
+      pool = null;
+      covCatCache = null;
+    }
+  },
+  5 * 60 * 1000,
+);
 
 // ─── Config Reader ────────────────────────────────────────────────────────────
 
@@ -82,31 +112,47 @@ async function readOdConfig() {
   for (const cfgPath of OD_CONFIG_PATHS) {
     try {
       if (!fs.existsSync(cfgPath)) continue;
-      const xml = fs.readFileSync(cfgPath, 'utf8');
+      const xml = fs.readFileSync(cfgPath, "utf8");
       const cfg = parseXmlSimple(xml);
 
-      const host = cfg.DatabaseServer || cfg.ComputerName || cfg.Server || 'localhost';
-      const database = cfg.Database || cfg.DbName || 'opendental';
-      const user = cfg.DatabaseUser || cfg.DbUser || cfg.User || 'root';
-      const port = parseInt(cfg.DatabasePort || cfg.Port || '3306', 10);
+      const host =
+        cfg.DatabaseServer || cfg.ComputerName || cfg.Server || "localhost";
+      const database = cfg.Database || cfg.DbName || "opendental";
+      const user = cfg.DatabaseUser || cfg.DbUser || cfg.User || "root";
+      const port = parseInt(cfg.DatabasePort || cfg.Port || "3306", 10);
 
       // OD commonly stores password as MySqlPassHash (hashed) — detect and log clearly
-      const rawPassword = cfg.DatabasePassword || cfg.DbPassword || cfg.Password || '';
-      const hashedPassword = cfg.MySqlPassHash || cfg.DatabasePasswordHash || '';
+      const rawPassword =
+        cfg.DatabasePassword || cfg.DbPassword || cfg.Password || "";
+      const hashedPassword =
+        cfg.MySqlPassHash || cfg.DatabasePasswordHash || "";
       if (!rawPassword && hashedPassword) {
-        logger(`Config found at ${cfgPath} but password is hashed (MySqlPassHash) — cannot connect. Set plaintext password in OD Settings > Databases.`);
+        logger(
+          `Config found at ${cfgPath} but password is hashed (MySqlPassHash) — cannot connect. Set plaintext password in OD Settings > Databases.`,
+        );
         continue;
       }
 
-      configCache = { host, database, user, password: rawPassword, port, configPath: cfgPath };
-      logger(`Config loaded from ${cfgPath} — host:${host} db:${database} user:${user}`);
+      configCache = {
+        host,
+        database,
+        user,
+        password: rawPassword,
+        port,
+        configPath: cfgPath,
+      };
+      logger(
+        `Config loaded from ${cfgPath} — host:${host} db:${database} user:${user}`,
+      );
       return configCache;
     } catch (e) {
       logger(`Config parse error at ${cfgPath}: ${e.message}`);
       continue;
     }
   }
-  logger(`FreeDentalConfig.xml not found at any standard path — OD MySQL unavailable`);
+  logger(
+    `FreeDentalConfig.xml not found at any standard path — OD MySQL unavailable`,
+  );
   return null;
 }
 
@@ -118,7 +164,7 @@ async function getPool() {
   if (!cfg) return null;
 
   try {
-    const mysql = require('mysql2/promise');
+    const mysql = require("mysql2/promise");
     const p = mysql.createPool({
       host: cfg.host,
       port: cfg.port,
@@ -132,10 +178,12 @@ async function getPool() {
     });
     // Connectivity test
     const conn = await p.getConnection();
-    await conn.query('SELECT 1');
+    await conn.query("SELECT 1");
     conn.release();
     pool = p;
-    logger(`Connected to ${cfg.host}:${cfg.port}/${cfg.database} — benefit queries ready`);
+    logger(
+      `Connected to ${cfg.host}:${cfg.port}/${cfg.database} — benefit queries ready`,
+    );
     return pool;
   } catch (e) {
     logger(`MySQL connection failed (${cfg.host}:${cfg.port}): ${e.message}`);
@@ -209,20 +257,30 @@ async function getBenefitsForPatient(patNum) {
         const type = BENEFIT_TYPE[r.BenefitType];
         if (!type) return null;
 
-        const category = CATEGORY_MAP[r.EbenefitCat] || r.CategoryDesc || 'GENERAL';
-        const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || 'None';
-        const period = TIME_PERIOD[r.TimePeriod] || 'None';
+        const category =
+          CATEGORY_MAP[r.EbenefitCat] || r.CategoryDesc || "GENERAL";
+        const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || "None";
+        const period = TIME_PERIOD[r.TimePeriod] || "None";
 
         const benefit = { type, category, coverage_level };
-        if (type === 'CoInsurance') {
+        if (type === "CoInsurance") {
+          // Percent = what the plan pays (0-100). Skip -1 (not applicable).
           const pct = Number(r.Percent);
-          if (isNaN(pct)) return null;
+          if (isNaN(pct) || pct < 0) return null;
           benefit.percent = pct;
-        } else if (type === 'Deductible' || type === 'FixedAmount') {
+        } else if (type === "Deductible") {
           benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
-        } else if (type === 'Frequency') {
-          benefit.quantity = r.Quantity;
-          benefit.period = period;
+        } else if (type === "Limitations") {
+          // Annual max: MonetaryAmt > 0, no Quantity qualifier
+          // Frequency rule: Quantity > 0 with a QuantityQualifier
+          if (Number(r.MonetaryAmt) > 0) {
+            benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
+          }
+          if (Number(r.Quantity) > 0 && Number(r.QuantityQualifier) > 0) {
+            benefit.quantity = r.Quantity;
+            benefit.period = period;
+            benefit.qualifier = r.QuantityQualifier;
+          }
         }
         return benefit;
       })
@@ -243,7 +301,7 @@ async function getPatNumByNameDOB(firstName, lastName, birthDate) {
     const [rows] = await p.query(
       `SELECT PatNum FROM patient
        WHERE LName = ? AND FName = ?
-       ${dob ? 'AND Birthdate = ?' : ''}
+       ${dob ? "AND Birthdate = ?" : ""}
        AND PatStatus = 0
        LIMIT 1`,
       dob ? [lastName, firstName, dob] : [lastName, firstName],
@@ -254,13 +312,57 @@ async function getPatNumByNameDOB(firstName, lastName, birthDate) {
   }
 }
 
-// ─── Today's Scheduled Appointments (MySQL — no REST API required) ────────────
+// ─── Dynamic CovCat Map ───────────────────────────────────────────────────────
+// Builds EDiFi-category → CovCatNum map from OD's covcat table.
+// Cached per session — avoids repeated DB queries on each write-back call.
 
-async function getAppointmentsToday() {
+async function buildCovCatMap() {
+  if (covCatCache) return covCatCache;
+  const p = await getPool();
+  if (!p) return {};
+  try {
+    const [rows] = await p.query(
+      `SELECT CovCatNum, EbenefitCat, Description FROM covcat ORDER BY CovCatNum`,
+    );
+    const EBENCAT_TO_EDIFI = {
+      0: "GENERAL",
+      1: "DIAGNOSTIC",
+      2: "PREVENTIVE",
+      3: "BASIC",
+      4: "ENDO",
+      5: "PERIO",
+      6: "ORAL_SURGERY",
+      7: "MAXILLOFACIAL",
+      8: "MAJOR",
+      9: "MAJOR",
+      10: "ACCIDENT",
+      11: "ORTHO",
+      12: "ADJUNCTIVE",
+      13: "IMPLANTS",
+    };
+    const map = {};
+    for (const row of rows) {
+      const edifiCat =
+        EBENCAT_TO_EDIFI[row.EbenefitCat] ??
+        (row.Description || "").toUpperCase().replace(/\s+/g, "_") ??
+        "GENERAL";
+      // First match wins — lower CovCatNum takes priority for shared categories (e.g. MAJOR=8 before 9)
+      if (!(edifiCat in map)) map[edifiCat] = row.CovCatNum;
+    }
+    covCatCache = map;
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+// ─── Appointments for Date (MySQL — no REST API required) ─────────────────────
+
+async function getAppointmentsForDate(date) {
   const p = await getPool();
   if (!p) return [];
+  const targetDate = date || new Date().toISOString().slice(0, 10);
   try {
-    const today = new Date().toISOString().slice(0, 10);
     const [rows] = await p.query(
       `SELECT a.AptNum, a.PatNum, a.AptDateTime,
               p.FName, p.LName, p.Birthdate,
@@ -268,15 +370,20 @@ async function getAppointmentsToday() {
        FROM appointment a
        JOIN patient p ON p.PatNum = a.PatNum
        WHERE DATE(a.AptDateTime) = ?
-         AND a.AptStatus = 1
+         AND a.AptStatus IN (1, 2)
        ORDER BY a.AptDateTime`,
-      [today],
+      [targetDate],
     );
     return rows;
   } catch (e) {
-    logger(`getAppointmentsToday error: ${e.message}`);
+    logger(`getAppointmentsForDate error (${targetDate}): ${e.message}`);
     return [];
   }
+}
+
+// Backward-compatible wrapper
+async function getAppointmentsToday() {
+  return getAppointmentsForDate(null);
 }
 
 // ─── Full Patient Insurance + Benefit Snapshot ────────────────────────────────
@@ -316,8 +423,10 @@ async function getPatientInsuranceSnapshot(patNum) {
         ordinal: r.Ordinal,
         carrier_name: r.CarrierName,
         payer_id: r.PayerID,
-        annual_max_cents: r.AnnualMax != null ? Math.round(Number(r.AnnualMax) * 100) : null,
-        deductible_cents: r.Deductible != null ? Math.round(Number(r.Deductible) * 100) : null,
+        annual_max_cents:
+          r.AnnualMax != null ? Math.round(Number(r.AnnualMax) * 100) : null,
+        deductible_cents:
+          r.Deductible != null ? Math.round(Number(r.Deductible) * 100) : null,
         subscriber_id: r.SubscriberID,
         date_effective: r.DateEffective,
         date_term: r.DateTerm,
@@ -329,9 +438,171 @@ async function getPatientInsuranceSnapshot(patNum) {
       benefits,
     };
   } catch (e) {
-    logger(`getPatientInsuranceSnapshot error for PatNum ${patNum}: ${e.message}`);
+    logger(
+      `getPatientInsuranceSnapshot error for PatNum ${patNum}: ${e.message}`,
+    );
     return null;
   }
+}
+
+// ─── Write Verified Benefits Back to OD MySQL ─────────────────────────────────
+
+async function writeOdBenefits(params) {
+  const {
+    pat_num,
+    benefits = [],
+    plan_note,
+    source,
+    confidence,
+    dry_run = false,
+  } = params;
+
+  const result = {
+    pat_num,
+    plan_num: null,
+    dry_run,
+    rows_written: 0,
+    rows_unchanged: 0,
+    plan_note_updated: false,
+    rollback_snapshot: null,
+    errors: [],
+  };
+
+  if (
+    source === "OD_MYSQL" ||
+    source === "od_mysql" ||
+    source === "OD_DIRECT"
+  ) {
+    result.errors.push("Circular write blocked — source is OD data");
+    return result;
+  }
+  if (confidence != null && Number(confidence) < 75) {
+    result.errors.push(`Confidence ${confidence} below threshold (75)`);
+    return result;
+  }
+
+  const p = await getPool();
+  if (!p) {
+    result.errors.push("OD MySQL unavailable");
+    return result;
+  }
+
+  const planInfo = await getPatientPlanInfo(pat_num);
+  if (!planInfo) {
+    result.errors.push(`No primary plan for PatNum ${pat_num}`);
+    return result;
+  }
+  const { PlanNum } = planInfo;
+  result.plan_num = PlanNum;
+
+  let existingBenefitRows = [],
+    existingPlan = null;
+  try {
+    const [bRows] = await p.query(
+      `SELECT BenefitNum, BenefitType, CovCatNum, Percent, MonetaryAmt, CoverageLevel
+       FROM benefit WHERE PlanNum = ? AND PatNum = 0`,
+      [PlanNum],
+    );
+    existingBenefitRows = bRows;
+    result.rollback_snapshot = bRows.map((r) => ({ ...r }));
+    const [pRows] = await p.query(
+      `SELECT PlanNum, AnnualMax, Deductible, PlanNote FROM insplan WHERE PlanNum = ?`,
+      [PlanNum],
+    );
+    existingPlan = pRows[0] ?? null;
+  } catch (e) {
+    result.errors.push(`Pre-read failed: ${e.message}`);
+    return result;
+  }
+
+  const covCatMap = await buildCovCatMap();
+
+  for (const b of benefits) {
+    try {
+      if (b.type === "AnnualMax") {
+        const newVal = (b.amount_cents ?? 0) / 100;
+        const curVal = Number(existingPlan?.AnnualMax ?? 0);
+        if (Math.abs(newVal - curVal) < 0.01) {
+          result.rows_unchanged++;
+          continue;
+        }
+        if (!dry_run)
+          await p.query(`UPDATE insplan SET AnnualMax = ? WHERE PlanNum = ?`, [
+            newVal,
+            PlanNum,
+          ]);
+        result.rows_written++;
+      } else if (b.type === "Deductible") {
+        const newVal = (b.amount_cents ?? 0) / 100;
+        const curVal = Number(existingPlan?.Deductible ?? 0);
+        if (Math.abs(newVal - curVal) < 0.01) {
+          result.rows_unchanged++;
+          continue;
+        }
+        if (!dry_run)
+          await p.query(`UPDATE insplan SET Deductible = ? WHERE PlanNum = ?`, [
+            newVal,
+            PlanNum,
+          ]);
+        result.rows_written++;
+      } else if (b.type === "CoInsurance") {
+        const covCatNum = covCatMap[b.category] ?? 0;
+        const percent = b.plan_pays_pct ?? 0;
+        const existing = existingBenefitRows.find(
+          (r) =>
+            r.BenefitType === 1 &&
+            r.CovCatNum === covCatNum &&
+            r.CoverageLevel === 0,
+        );
+        if (existing && Math.abs(Number(existing.Percent) - percent) < 0.01) {
+          result.rows_unchanged++;
+          continue;
+        }
+        if (!dry_run) {
+          if (existing) {
+            await p.query(
+              `UPDATE benefit SET Percent = ? WHERE BenefitNum = ?`,
+              [percent, existing.BenefitNum],
+            );
+          } else {
+            await p.query(
+              `INSERT INTO benefit (PlanNum, PatNum, CodeNum, CovCatNum, BenefitType, Percent, MonetaryAmt, TimePeriod, QuantityQualifier, Quantity, CoverageLevel)
+               VALUES (?, 0, 0, ?, 1, ?, 0, 2, 0, -1, 0)`,
+              [PlanNum, covCatNum, percent],
+            );
+          }
+        }
+        result.rows_written++;
+      }
+    } catch (e) {
+      result.errors.push(`${b.type}/${b.category ?? ""}: ${e.message}`);
+    }
+  }
+
+  if (plan_note) {
+    try {
+      const existing = (existingPlan?.PlanNote ?? '').trim();
+      // Deduplication: check if this date's entry is already in the plan note.
+      // Plan note format: "5/18/26 EDiFi EDI. ..." — first 8 chars are the date prefix.
+      const notePrefix = plan_note.substring(0, 8);
+      const alreadyWritten = notePrefix && existing.includes(notePrefix);
+      if (!alreadyWritten) {
+        const newNote = existing ? `${existing}\n${plan_note}` : plan_note;
+        if (!dry_run)
+          await p.query(`UPDATE insplan SET PlanNote = ? WHERE PlanNum = ?`, [newNote, PlanNum]);
+        result.plan_note_updated = true;
+      }
+    } catch (e) {
+      result.errors.push(`Plan note: ${e.message}`);
+    }
+  }
+
+  logger(
+    `[WriteBack] PatNum ${pat_num} Plan ${PlanNum}: ` +
+      `${dry_run ? "[DRY RUN] " : ""}${result.rows_written} written, ` +
+      `${result.rows_unchanged} unchanged, ${result.errors.length} errors`,
+  );
+  return result;
 }
 
 module.exports = {
@@ -339,7 +610,10 @@ module.exports = {
   readOdConfig,
   getBenefitsForPatient,
   getPatNumByNameDOB,
+  getAppointmentsForDate,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
+  writeOdBenefits,
+  buildCovCatMap,
   setLogger,
 };

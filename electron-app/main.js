@@ -18,8 +18,10 @@ const {
   isAvailable: isMysqlAvailable,
   getBenefitsForPatient,
   getPatNumByNameDOB,
+  getAppointmentsForDate,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
+  writeOdBenefits,
   setLogger: setMysqlLogger,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
@@ -87,15 +89,18 @@ const od_sync_status = {
 // Electron does NOT read Railway env vars — it is an office-local process.
 
 const AGENT_CAPABILITIES = [
-  'REPORT_STATUS',
-  'REPORT_CONFIG_STATUS',
-  'REPORT_UPDATE_STATUS',
-  'REPORT_OD_STATUS',
-  'CHECK_FOR_UPDATE',
-  'DOWNLOAD_UPDATE',
-  'SYNC_OD_NOW',
-  'RESTART_APP',
-  'QUIT_AND_INSTALL',
+  "REPORT_STATUS",
+  "REPORT_CONFIG_STATUS",
+  "REPORT_UPDATE_STATUS",
+  "REPORT_OD_STATUS",
+  "CHECK_FOR_UPDATE",
+  "DOWNLOAD_UPDATE",
+  "SYNC_OD_NOW",
+  "WRITE_OD_BENEFITS",
+  "GET_SESSION_COOKIES",
+  "CLEAR_SESSION_COOKIES",
+  "RESTART_APP",
+  "QUIT_AND_INSTALL",
 ];
 
 function loadConfig() {
@@ -208,7 +213,9 @@ function announceSessions() {
       payers: active.map((s) => s.payerCode),
     }),
   );
-  log(`[Portal] Announced ${active.length} active session(s): ${active.map((s) => s.payerCode).join(", ")}`);
+  log(
+    `[Portal] Announced ${active.length} active session(s): ${active.map((s) => s.payerCode).join(", ")}`,
+  );
 }
 
 async function loadSavedPortalSessions() {
@@ -263,7 +270,9 @@ function openPortalWindow(portal) {
   const checkAndCapture = async () => {
     const cookies = await checkPartitionCookies(portal);
     if (!cookies) return;
-    log(`[Portal] Session captured: ${portal.payerName} (${cookies.length} cookies)`);
+    log(
+      `[Portal] Session captured: ${portal.payerName} (${cookies.length} cookies)`,
+    );
     storeSession(
       config.office_id,
       portal.payerCode,
@@ -296,7 +305,7 @@ function openPortalWindow(portal) {
 
 function getMachineIdHash() {
   if (!config.machine_id) return null;
-  return createHash('sha256').update(config.machine_id).digest('hex');
+  return createHash("sha256").update(config.machine_id).digest("hex");
 }
 
 function getSafeConfigStatus() {
@@ -317,7 +326,7 @@ async function sendAgentHello() {
   configStatus.od_mysql_config_present = mysqlOk;
 
   const hello = {
-    type: 'AGENT_HELLO',
+    type: "AGENT_HELLO",
     office_id: config.office_id,
     app_version: app.getVersion(),
     machine_id_hash: getMachineIdHash(),
@@ -331,7 +340,9 @@ async function sendAgentHello() {
   };
 
   tunnel.send(JSON.stringify(hello));
-  log(`[RemoteControl] AGENT_HELLO sent: v${app.getVersion()} caps=${AGENT_CAPABILITIES.length}`);
+  log(
+    `[RemoteControl] AGENT_HELLO sent: v${app.getVersion()} caps=${AGENT_CAPABILITIES.length}`,
+  );
 }
 
 // ─── Remote Command Router ────────────────────────────────────────────────────
@@ -345,11 +356,17 @@ async function sendAgentHello() {
 //   - Never return credentials, tokens, PHI, or raw config values
 
 async function handleCommand(msg) {
-  const { command_id, command_type, payload, expires_at, office_id: cmdOfficeId } = msg;
+  const {
+    command_id,
+    command_type,
+    payload,
+    expires_at,
+    office_id: cmdOfficeId,
+  } = msg;
 
   // Validate required fields
   if (!command_id || !command_type) {
-    log('[RemoteControl] Rejected command: missing command_id or command_type');
+    log("[RemoteControl] Rejected command: missing command_id or command_type");
     return;
   }
 
@@ -361,84 +378,136 @@ async function handleCommand(msg) {
 
   // Validate expiry
   if (expires_at && new Date(expires_at) < new Date()) {
-    log(`[RemoteControl] Rejected command ${command_id}: expired at ${expires_at}`);
-    sendCommandResult(command_id, command_type, 'FAILED', null, 'EXPIRED', 'Command expired before delivery');
+    log(
+      `[RemoteControl] Rejected command ${command_id}: expired at ${expires_at}`,
+    );
+    sendCommandResult(
+      command_id,
+      command_type,
+      "FAILED",
+      null,
+      "EXPIRED",
+      "Command expired before delivery",
+    );
     return;
   }
 
   // Validate command type is in capability list
   if (!AGENT_CAPABILITIES.includes(command_type)) {
     log(`[RemoteControl] Rejected unknown command type: ${command_type}`);
-    sendCommandResult(command_id, command_type, 'FAILED', null, 'UNKNOWN_COMMAND', `Command type not supported: ${command_type}`);
+    sendCommandResult(
+      command_id,
+      command_type,
+      "FAILED",
+      null,
+      "UNKNOWN_COMMAND",
+      `Command type not supported: ${command_type}`,
+    );
     return;
   }
 
   // Send ACK immediately
   sendCommandAck(command_id);
-  log(`[RemoteControl] Handling command: ${command_type} (${command_id.slice(0, 8)})`);
+  log(
+    `[RemoteControl] Handling command: ${command_type} (${command_id.slice(0, 8)})`,
+  );
 
   try {
     switch (command_type) {
-      case 'REPORT_STATUS':
+      case "REPORT_STATUS":
         await handleReportStatus(command_id);
         break;
-      case 'REPORT_CONFIG_STATUS':
+      case "REPORT_CONFIG_STATUS":
         await handleReportConfigStatus(command_id);
         break;
-      case 'REPORT_UPDATE_STATUS':
+      case "REPORT_UPDATE_STATUS":
         await handleReportUpdateStatus(command_id);
         break;
-      case 'REPORT_OD_STATUS':
+      case "REPORT_OD_STATUS":
         await handleReportOdStatus(command_id);
         break;
-      case 'CHECK_FOR_UPDATE':
+      case "CHECK_FOR_UPDATE":
         await handleCheckForUpdate(command_id);
         break;
-      case 'DOWNLOAD_UPDATE':
+      case "DOWNLOAD_UPDATE":
         await handleDownloadUpdate(command_id);
         break;
-      case 'SYNC_OD_NOW':
-        await handleSyncOdNow(command_id);
+      case "SYNC_OD_NOW":
+        await handleSyncOdNow(command_id, payload);
         break;
-      case 'RESTART_APP':
+      case "WRITE_OD_BENEFITS":
+        await handleWriteOdBenefits(command_id, payload);
+        break;
+      case "GET_SESSION_COOKIES":
+        await handleGetSessionCookies(command_id, payload);
+        break;
+      case "CLEAR_SESSION_COOKIES":
+        await handleClearSessionCookies(command_id, payload);
+        break;
+      case "RESTART_APP":
         await handleRestartApp(command_id);
         break;
-      case 'QUIT_AND_INSTALL':
+      case "QUIT_AND_INSTALL":
         await handleQuitAndInstall(command_id);
         break;
       default:
-        sendCommandResult(command_id, command_type, 'FAILED', null, 'UNKNOWN_COMMAND', `Unhandled command: ${command_type}`);
+        sendCommandResult(
+          command_id,
+          command_type,
+          "FAILED",
+          null,
+          "UNKNOWN_COMMAND",
+          `Unhandled command: ${command_type}`,
+        );
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     log(`[RemoteControl] Command error ${command_type}: ${msg}`);
-    sendCommandResult(command_id, command_type, 'FAILED', null, 'HANDLER_ERROR', msg.slice(0, 200));
+    sendCommandResult(
+      command_id,
+      command_type,
+      "FAILED",
+      null,
+      "HANDLER_ERROR",
+      msg.slice(0, 200),
+    );
   }
 }
 
 function sendCommandAck(commandId) {
   if (!tunnel || !tunnelOk) return;
-  tunnel.send(JSON.stringify({
-    type: 'COMMAND_ACK',
-    command_id: commandId,
-    agent_instance_id: AGENT_INSTANCE_ID,
-    received_at: new Date().toISOString(),
-  }));
+  tunnel.send(
+    JSON.stringify({
+      type: "COMMAND_ACK",
+      command_id: commandId,
+      agent_instance_id: AGENT_INSTANCE_ID,
+      received_at: new Date().toISOString(),
+    }),
+  );
 }
 
-function sendCommandResult(commandId, commandType, status, result, errorCode, errorMessage) {
+function sendCommandResult(
+  commandId,
+  commandType,
+  status,
+  result,
+  errorCode,
+  errorMessage,
+) {
   if (!tunnel || !tunnelOk) return;
-  tunnel.send(JSON.stringify({
-    type: 'COMMAND_RESULT',
-    command_id: commandId,
-    command_type: commandType,
-    agent_instance_id: AGENT_INSTANCE_ID,
-    status,
-    result: result ?? null,
-    error_code: errorCode ?? null,
-    error_message: errorMessage ?? null,
-    completed_at: new Date().toISOString(),
-  }));
+  tunnel.send(
+    JSON.stringify({
+      type: "COMMAND_RESULT",
+      command_id: commandId,
+      command_type: commandType,
+      agent_instance_id: AGENT_INSTANCE_ID,
+      status,
+      result: result ?? null,
+      error_code: errorCode ?? null,
+      error_message: errorMessage ?? null,
+      completed_at: new Date().toISOString(),
+    }),
+  );
 }
 
 // ── REPORT_STATUS ─────────────────────────────────────────────────────────────
@@ -453,11 +522,17 @@ async function handleReportStatus(commandId) {
     capabilities: AGENT_CAPABILITIES,
     bridge_connected: tunnelOk,
     update_status: { ...update_status },
-    od_sync_status: { ...od_sync_status, available: mysqlOk || !!config.od_api_url },
-    safe_config_status: { ...getSafeConfigStatus(), od_mysql_config_present: mysqlOk },
+    od_sync_status: {
+      ...od_sync_status,
+      available: mysqlOk || !!config.od_api_url,
+    },
+    safe_config_status: {
+      ...getSafeConfigStatus(),
+      od_mysql_config_present: mysqlOk,
+    },
     portal_sessions_count: activeSessions().length,
   };
-  sendCommandResult(commandId, 'REPORT_STATUS', 'COMPLETED', result);
+  sendCommandResult(commandId, "REPORT_STATUS", "COMPLETED", result);
 }
 
 // ── REPORT_CONFIG_STATUS ──────────────────────────────────────────────────────
@@ -475,7 +550,7 @@ async function handleReportConfigStatus(commandId) {
     portal_sessions_count: activeSessions().length,
     has_bridge_url: !!EDIFI_CLOUD_WS,
   };
-  sendCommandResult(commandId, 'REPORT_CONFIG_STATUS', 'COMPLETED', result);
+  sendCommandResult(commandId, "REPORT_CONFIG_STATUS", "COMPLETED", result);
 }
 
 // ── REPORT_UPDATE_STATUS ──────────────────────────────────────────────────────
@@ -485,7 +560,7 @@ async function handleReportUpdateStatus(commandId) {
     current_version: app.getVersion(),
     ...update_status,
   };
-  sendCommandResult(commandId, 'REPORT_UPDATE_STATUS', 'COMPLETED', result);
+  sendCommandResult(commandId, "REPORT_UPDATE_STATUS", "COMPLETED", result);
 }
 
 // ── REPORT_OD_STATUS ──────────────────────────────────────────────────────────
@@ -498,7 +573,7 @@ async function handleReportOdStatus(commandId) {
     od_api_url_present: !!config.od_api_url,
     ...od_sync_status,
   };
-  sendCommandResult(commandId, 'REPORT_OD_STATUS', 'COMPLETED', result);
+  sendCommandResult(commandId, "REPORT_OD_STATUS", "COMPLETED", result);
 }
 
 // ── CHECK_FOR_UPDATE ──────────────────────────────────────────────────────────
@@ -512,7 +587,7 @@ async function handleCheckForUpdate(commandId) {
     update_status.checking = false;
     const updateAvailable = !!checkResult?.updateInfo;
     update_status.available = updateAvailable;
-    sendCommandResult(commandId, 'CHECK_FOR_UPDATE', 'COMPLETED', {
+    sendCommandResult(commandId, "CHECK_FOR_UPDATE", "COMPLETED", {
       update_available: updateAvailable,
       current_version: app.getVersion(),
       latest_version: checkResult?.updateInfo?.version ?? null,
@@ -520,7 +595,14 @@ async function handleCheckForUpdate(commandId) {
   } catch (e) {
     update_status.checking = false;
     update_status.last_error = e.message.slice(0, 200);
-    sendCommandResult(commandId, 'CHECK_FOR_UPDATE', 'FAILED', null, 'UPDATE_CHECK_ERROR', e.message.slice(0, 200));
+    sendCommandResult(
+      commandId,
+      "CHECK_FOR_UPDATE",
+      "FAILED",
+      null,
+      "UPDATE_CHECK_ERROR",
+      e.message.slice(0, 200),
+    );
   }
 }
 
@@ -528,51 +610,69 @@ async function handleCheckForUpdate(commandId) {
 
 async function handleDownloadUpdate(commandId) {
   if (update_status.downloaded) {
-    sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'COMPLETED', {
+    sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
       already_downloaded: true,
       current_version: app.getVersion(),
     });
     return;
   }
   if (!update_status.available) {
-    sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'FAILED', null, 'NO_UPDATE_AVAILABLE', 'No update available to download. Run CHECK_FOR_UPDATE first.');
+    sendCommandResult(
+      commandId,
+      "DOWNLOAD_UPDATE",
+      "FAILED",
+      null,
+      "NO_UPDATE_AVAILABLE",
+      "No update available to download. Run CHECK_FOR_UPDATE first.",
+    );
     return;
   }
   // autoDownload is true — download is already in progress or will start automatically
-  sendCommandResult(commandId, 'DOWNLOAD_UPDATE', 'COMPLETED', {
+  sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
     download_in_progress: true,
-    note: 'autoDownload is enabled; download will complete in background',
+    note: "autoDownload is enabled; download will complete in background",
     current_version: app.getVersion(),
   });
 }
 
 // ── SYNC_OD_NOW ───────────────────────────────────────────────────────────────
 
-async function handleSyncOdNow(commandId) {
+async function handleSyncOdNow(commandId, payload) {
   od_sync_status.last_attempt_at = new Date().toISOString();
+  const syncDate = payload?.sync_date || null; // null = today
   const mysqlOk = await isMysqlAvailable().catch(() => false);
 
   if (!mysqlOk && !config.od_api_url) {
-    od_sync_status.last_error = 'Neither OD MySQL nor OD Web Service is configured';
-    sendCommandResult(commandId, 'SYNC_OD_NOW', 'FAILED', null, 'OD_NOT_CONFIGURED', od_sync_status.last_error);
+    od_sync_status.last_error =
+      "Neither OD MySQL nor OD Web Service is configured";
+    sendCommandResult(
+      commandId,
+      "SYNC_OD_NOW",
+      "FAILED",
+      null,
+      "OD_NOT_CONFIGURED",
+      od_sync_status.last_error,
+    );
     return;
   }
 
   try {
     // Report STARTED before the sync begins
     if (tunnel && tunnelOk) {
-      tunnel.send(JSON.stringify({
-        type: 'COMMAND_RESULT',
-        command_id: commandId,
-        command_type: 'SYNC_OD_NOW',
-        agent_instance_id: AGENT_INSTANCE_ID,
-        status: 'STARTED',
-        completed_at: new Date().toISOString(),
-      }));
+      tunnel.send(
+        JSON.stringify({
+          type: "COMMAND_RESULT",
+          command_id: commandId,
+          command_type: "SYNC_OD_NOW",
+          agent_instance_id: AGENT_INSTANCE_ID,
+          status: "STARTED",
+          completed_at: new Date().toISOString(),
+        }),
+      );
     }
 
     if (mysqlOk) {
-      await syncODMySql();
+      await syncODMySql(syncDate);
     } else {
       await syncODData();
     }
@@ -580,13 +680,140 @@ async function handleSyncOdNow(commandId) {
     od_sync_status.last_success_at = new Date().toISOString();
     od_sync_status.last_error = null;
 
-    sendCommandResult(commandId, 'SYNC_OD_NOW', 'COMPLETED', {
-      sync_method: mysqlOk ? 'od_mysql' : 'od_rest_api',
+    sendCommandResult(commandId, "SYNC_OD_NOW", "COMPLETED", {
+      sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
       completed_at: od_sync_status.last_success_at,
     });
   } catch (e) {
     od_sync_status.last_error = e.message.slice(0, 200);
-    sendCommandResult(commandId, 'SYNC_OD_NOW', 'FAILED', null, 'SYNC_ERROR', od_sync_status.last_error);
+    sendCommandResult(
+      commandId,
+      "SYNC_OD_NOW",
+      "FAILED",
+      null,
+      "SYNC_ERROR",
+      od_sync_status.last_error,
+    );
+  }
+}
+
+// ── WRITE_OD_BENEFITS ─────────────────────────────────────────────────────────
+// Writes verified eligibility benefit data back into OD's MySQL database.
+// Uses the same MySQL connection as SYNC_OD_NOW — no OD REST API required.
+// Supports dry_run=true for preview before committing writes.
+
+async function handleWriteOdBenefits(commandId, payload) {
+  const mysqlOk = await isMysqlAvailable().catch(() => false);
+  if (!mysqlOk) {
+    sendCommandResult(
+      commandId,
+      "WRITE_OD_BENEFITS",
+      "FAILED",
+      null,
+      "OD_MYSQL_UNAVAILABLE",
+      "OD MySQL not available — cannot write benefits",
+    );
+    return;
+  }
+  if (!payload?.pat_num) {
+    sendCommandResult(
+      commandId,
+      "WRITE_OD_BENEFITS",
+      "FAILED",
+      null,
+      "MISSING_PAT_NUM",
+      "payload.pat_num is required",
+    );
+    return;
+  }
+
+  try {
+    const result = await writeOdBenefits({
+      pat_num: payload.pat_num,
+      benefits: payload.benefits ?? [],
+      plan_note: payload.plan_note ?? null,
+      source: payload.source ?? null,
+      confidence: payload.confidence ?? null,
+      dry_run: payload.dry_run === true,
+    });
+
+    sendCommandResult(
+      commandId,
+      "WRITE_OD_BENEFITS",
+      result.errors.length === 0 || result.rows_written > 0
+        ? "COMPLETED"
+        : "FAILED",
+      result,
+      result.errors.length > 0 ? "PARTIAL_ERRORS" : undefined,
+      result.errors.length > 0 ? result.errors.join("; ") : undefined,
+    );
+  } catch (e) {
+    sendCommandResult(
+      commandId,
+      "WRITE_OD_BENEFITS",
+      "FAILED",
+      null,
+      "WRITE_ERROR",
+      e.message.slice(0, 200),
+    );
+  }
+}
+
+// ── GET_SESSION_COOKIES ───────────────────────────────────────────────────────
+// Returns authenticated portal session cookies for a specific payer.
+// Called by Railway before launching a portal scraper so the scraper can inject
+// the live session instead of doing a credential-based login.
+// Cookie values are NEVER logged — only transmitted over the encrypted WSS tunnel.
+
+async function handleGetSessionCookies(commandId, payload) {
+  const payerCode = payload?.payer_code;
+  if (!payerCode) {
+    sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'FAILED', null,
+      'MISSING_PAYER_CODE', 'payload.payer_code is required');
+    return;
+  }
+
+  const session = getSession(config.office_id, payerCode);
+  if (!session) {
+    sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'COMPLETED', {
+      payer_code: payerCode,
+      available: false,
+      cookies: null,
+      reason: 'No active session for this payer',
+    });
+    return;
+  }
+
+  const ageMinutes = Math.round((Date.now() - session.at) / 60000);
+  const remainingMinutes = Math.round((SESSION_TTL - (Date.now() - session.at)) / 60000);
+
+  // Transmit cookies over encrypted WSS — never log values
+  log(`[Portal] GET_SESSION_COOKIES: sending ${session.cookies.length} cookies for ${payerCode} (age: ${ageMinutes}min, expires in: ${remainingMinutes}min)`);
+
+  sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'COMPLETED', {
+    payer_code: payerCode,
+    available: true,
+    cookies: session.cookies,
+    captured_at: new Date(session.at).toISOString(),
+    age_minutes: ageMinutes,
+    expires_in_minutes: remainingMinutes,
+  });
+}
+
+// ── CLEAR_SESSION_COOKIES ─────────────────────────────────────────────────────
+
+async function handleClearSessionCookies(commandId, payload) {
+  const payerCode = payload?.payer_code;
+  if (payerCode) {
+    sessions.delete(`${config.office_id}:${payerCode}`);
+    log(`[Portal] CLEAR_SESSION_COOKIES: cleared session for ${payerCode}`);
+    sendCommandResult(commandId, 'CLEAR_SESSION_COOKIES', 'COMPLETED', { payer_code: payerCode, cleared: true });
+  } else {
+    // Clear all sessions
+    const count = sessions.size;
+    sessions.clear();
+    log(`[Portal] CLEAR_SESSION_COOKIES: cleared all ${count} sessions`);
+    sendCommandResult(commandId, 'CLEAR_SESSION_COOKIES', 'COMPLETED', { cleared_count: count });
   }
 }
 
@@ -594,11 +821,11 @@ async function handleSyncOdNow(commandId) {
 
 async function handleRestartApp(commandId) {
   // Send result BEFORE restarting — once app exits, tunnel drops
-  sendCommandResult(commandId, 'RESTART_APP', 'COMPLETED', {
+  sendCommandResult(commandId, "RESTART_APP", "COMPLETED", {
     restarting: true,
-    note: 'App will disconnect and reconnect with fresh session',
+    note: "App will disconnect and reconnect with fresh session",
   });
-  log('[RemoteControl] Restarting app on server command');
+  log("[RemoteControl] Restarting app on server command");
   // Small delay so ACK and RESULT have time to transmit
   setTimeout(() => {
     app.relaunch();
@@ -610,15 +837,22 @@ async function handleRestartApp(commandId) {
 
 async function handleQuitAndInstall(commandId) {
   if (!update_status.downloaded) {
-    sendCommandResult(commandId, 'QUIT_AND_INSTALL', 'FAILED', null, 'UPDATE_NOT_DOWNLOADED', 'Update must be downloaded before installing. Run CHECK_FOR_UPDATE and wait for download to complete.');
+    sendCommandResult(
+      commandId,
+      "QUIT_AND_INSTALL",
+      "FAILED",
+      null,
+      "UPDATE_NOT_DOWNLOADED",
+      "Update must be downloaded before installing. Run CHECK_FOR_UPDATE and wait for download to complete.",
+    );
     return;
   }
   // Send result BEFORE quitting
-  sendCommandResult(commandId, 'QUIT_AND_INSTALL', 'COMPLETED', {
+  sendCommandResult(commandId, "QUIT_AND_INSTALL", "COMPLETED", {
     installing: true,
-    note: 'App will quit and install the downloaded update',
+    note: "App will quit and install the downloaded update",
   });
-  log('[RemoteControl] Quitting and installing update on server command');
+  log("[RemoteControl] Quitting and installing update on server command");
   setTimeout(() => {
     autoUpdater.quitAndInstall(false, true);
   }, 500);
@@ -647,7 +881,9 @@ function connectTunnel() {
     log("Tunnel connected to EDiFi Cloud");
     updateTray();
     // Send AGENT_HELLO first — backend stores version and capabilities
-    sendAgentHello().catch((e) => log(`[RemoteControl] AGENT_HELLO error: ${e.message}`));
+    sendAgentHello().catch((e) =>
+      log(`[RemoteControl] AGENT_HELLO error: ${e.message}`),
+    );
     // Restore sessions saved from previous portal logins, then announce
     loadSavedPortalSessions().then(() => {
       // Also announce any sessions already in memory from this run
@@ -682,47 +918,63 @@ function connectTunnel() {
       // Safer than Playwright on the office machine: browser runs on Railway + proxy.
       if (msg.type === "SESSION_REQUEST") {
         const session = getSession(config.office_id, msg.payer_code);
-        log(`[SESSION_REQUEST] ${msg.payer_code}: ${session ? session.cookies.length + ' cookies' : 'no session'}`);
-        tunnel.send(JSON.stringify({
-          type: "SESSION_RESPONSE",
-          scrape_id: msg.scrape_id,
-          payer_code: msg.payer_code,
-          cookies: session?.cookies ?? [],
-        }));
+        log(
+          `[SESSION_REQUEST] ${msg.payer_code}: ${session ? session.cookies.length + " cookies" : "no session"}`,
+        );
+        tunnel.send(
+          JSON.stringify({
+            type: "SESSION_RESPONSE",
+            scrape_id: msg.scrape_id,
+            payer_code: msg.payer_code,
+            cookies: session?.cookies ?? [],
+          }),
+        );
       }
       // OD_BENEFIT_REQUEST — server asks for OD benefit data for a specific patient.
       // Looks up PatNum by name+DOB, returns full insurance snapshot from MySQL.
       if (msg.type === "OD_BENEFIT_REQUEST") {
         const { scrape_id, first_name, last_name, birth_date, pat_num } = msg;
-        log(`[OD Benefit] Request for ${first_name} ${last_name} (${birth_date || pat_num})`);
+        log(
+          `[OD Benefit] Request for ${first_name} ${last_name} (${birth_date || pat_num})`,
+        );
         try {
-          const resolvedPatNum = pat_num || (await getPatNumByNameDOB(first_name, last_name, birth_date));
+          const resolvedPatNum =
+            pat_num ||
+            (await getPatNumByNameDOB(first_name, last_name, birth_date));
           if (!resolvedPatNum) {
-            tunnel.send(JSON.stringify({
-              type: "OD_BENEFIT_RESPONSE",
-              scrape_id,
-              found: false,
-              reason: "patient_not_found",
-            }));
+            tunnel.send(
+              JSON.stringify({
+                type: "OD_BENEFIT_RESPONSE",
+                scrape_id,
+                found: false,
+                reason: "patient_not_found",
+              }),
+            );
           } else {
             const snapshot = await getPatientInsuranceSnapshot(resolvedPatNum);
-            tunnel.send(JSON.stringify({
-              type: "OD_BENEFIT_RESPONSE",
-              scrape_id,
-              found: true,
-              pat_num: resolvedPatNum,
-              ...snapshot,
-            }));
-            log(`[OD Benefit] Sent snapshot for PatNum ${resolvedPatNum}: ${snapshot?.benefits?.length ?? 0} benefits`);
+            tunnel.send(
+              JSON.stringify({
+                type: "OD_BENEFIT_RESPONSE",
+                scrape_id,
+                found: true,
+                pat_num: resolvedPatNum,
+                ...snapshot,
+              }),
+            );
+            log(
+              `[OD Benefit] Sent snapshot for PatNum ${resolvedPatNum}: ${snapshot?.benefits?.length ?? 0} benefits`,
+            );
           }
         } catch (e) {
           log(`[OD Benefit] Error: ${e.message}`);
-          tunnel.send(JSON.stringify({
-            type: "OD_BENEFIT_RESPONSE",
-            scrape_id,
-            found: false,
-            reason: e.message,
-          }));
+          tunnel.send(
+            JSON.stringify({
+              type: "OD_BENEFIT_RESPONSE",
+              scrape_id,
+              found: false,
+              reason: e.message,
+            }),
+          );
         }
       }
       if (msg.type === "OD_PUSH_ACK") {
@@ -764,7 +1016,7 @@ function connectTunnel() {
       // Handled by the command router which enforces all safety rules.
       if (msg.type === "COMMAND_REQUEST") {
         handleCommand(msg).catch((e) =>
-          log(`[RemoteControl] handleCommand error: ${e.message}`)
+          log(`[RemoteControl] handleCommand error: ${e.message}`),
         );
       }
     } catch (e) {
@@ -833,29 +1085,46 @@ async function getOdCovCats() {
   if (odCovCatCache) return odCovCatCache;
   // Default OD categories — used when /covcat endpoint unavailable
   const defaults = {
-    1: 'DIAGNOSTIC', 2: 'PREVENTIVE', 3: 'BASIC', 4: 'ENDODONTIC',
-    5: 'PERIODONTIC', 6: 'ORAL_SURGERY', 7: 'PROSTHODONTIA', 8: 'IMPLANT',
-    9: 'ORTHODONTIC', 10: 'PREVENTIVE', 11: 'GENERAL', 12: 'MAJOR',
-    13: 'PROSTHODONTIA', 14: 'PROSTHODONTIA',
+    1: "DIAGNOSTIC",
+    2: "PREVENTIVE",
+    3: "BASIC",
+    4: "ENDODONTIC",
+    5: "PERIODONTIC",
+    6: "ORAL_SURGERY",
+    7: "PROSTHODONTIA",
+    8: "IMPLANT",
+    9: "ORTHODONTIC",
+    10: "PREVENTIVE",
+    11: "GENERAL",
+    12: "MAJOR",
+    13: "PROSTHODONTIA",
+    14: "PROSTHODONTIA",
   };
   try {
-    const cats = await odGet('/covcat');
+    const cats = await odGet("/covcat");
     if (Array.isArray(cats) && cats.length > 0) {
       const map = {};
       for (const c of cats) {
         // Map EbenefitCat to category code; fall back to description-based detection
-        const desc = (c.Description || '').toUpperCase();
-        let cat = 'GENERAL';
-        if (desc.includes('PREVENT')) cat = 'PREVENTIVE';
-        else if (desc.includes('BASIC') || desc.includes('RESTOR')) cat = 'BASIC';
-        else if (desc.includes('MAJOR')) cat = 'MAJOR';
-        else if (desc.includes('ENDO')) cat = 'ENDODONTIC';
-        else if (desc.includes('PERIO')) cat = 'PERIODONTIC';
-        else if (desc.includes('ORAL') || desc.includes('SURGERY')) cat = 'ORAL_SURGERY';
-        else if (desc.includes('ORTHO')) cat = 'ORTHODONTIC';
-        else if (desc.includes('IMPLANT')) cat = 'IMPLANT';
-        else if (desc.includes('PROSTHO') || desc.includes('CROWN') || desc.includes('BRIDGE')) cat = 'PROSTHODONTIA';
-        else if (desc.includes('DIAGN')) cat = 'DIAGNOSTIC';
+        const desc = (c.Description || "").toUpperCase();
+        let cat = "GENERAL";
+        if (desc.includes("PREVENT")) cat = "PREVENTIVE";
+        else if (desc.includes("BASIC") || desc.includes("RESTOR"))
+          cat = "BASIC";
+        else if (desc.includes("MAJOR")) cat = "MAJOR";
+        else if (desc.includes("ENDO")) cat = "ENDODONTIC";
+        else if (desc.includes("PERIO")) cat = "PERIODONTIC";
+        else if (desc.includes("ORAL") || desc.includes("SURGERY"))
+          cat = "ORAL_SURGERY";
+        else if (desc.includes("ORTHO")) cat = "ORTHODONTIC";
+        else if (desc.includes("IMPLANT")) cat = "IMPLANT";
+        else if (
+          desc.includes("PROSTHO") ||
+          desc.includes("CROWN") ||
+          desc.includes("BRIDGE")
+        )
+          cat = "PROSTHODONTIA";
+        else if (desc.includes("DIAGN")) cat = "DIAGNOSTIC";
         map[c.CovCatNum] = cat;
       }
       odCovCatCache = map;
@@ -867,35 +1136,58 @@ async function getOdCovCats() {
 }
 
 function mapOdApiBenefits(rawBenefits) {
-  const BEN_TYPE = { 1: 'Frequency', 3: 'Copay', 4: 'Deductible', 6: 'CoInsurance' };
-  const COV_LEVEL = { 0: 'None', 1: 'Individual', 2: 'Family' };
+  const BEN_TYPE = {
+    1: "Frequency",
+    3: "Copay",
+    4: "Deductible",
+    6: "CoInsurance",
+  };
+  const COV_LEVEL = { 0: "None", 1: "Individual", 2: "Family" };
   const TIME_PERIOD = {
-    0: 'None', 1: 'ServiceYear', 2: 'CalendarYear', 3: 'Lifetime',
-    4: 'Years2', 5: 'Years3', 8: 'Months6', 12: 'Months24',
+    0: "None",
+    1: "ServiceYear",
+    2: "CalendarYear",
+    3: "Lifetime",
+    4: "Years2",
+    5: "Years3",
+    8: "Months6",
+    12: "Months24",
   };
   // Use cached covcat if available, else default numeric mapping
   const catMap = odCovCatCache || {
-    1: 'DIAGNOSTIC', 2: 'PREVENTIVE', 3: 'BASIC', 4: 'ENDODONTIC',
-    5: 'PERIODONTIC', 6: 'ORAL_SURGERY', 7: 'PROSTHODONTIA', 8: 'IMPLANT',
-    9: 'ORTHODONTIC', 10: 'PREVENTIVE', 11: 'GENERAL', 12: 'MAJOR',
+    1: "DIAGNOSTIC",
+    2: "PREVENTIVE",
+    3: "BASIC",
+    4: "ENDODONTIC",
+    5: "PERIODONTIC",
+    6: "ORAL_SURGERY",
+    7: "PROSTHODONTIA",
+    8: "IMPLANT",
+    9: "ORTHODONTIC",
+    10: "PREVENTIVE",
+    11: "GENERAL",
+    12: "MAJOR",
   };
 
   const results = [];
   for (const b of rawBenefits) {
     const type = BEN_TYPE[b.BenefitType];
     if (!type) continue;
-    const category = catMap[b.CovCatNum] || 'GENERAL';
-    const coverage_level = COV_LEVEL[b.CoverageLevel] || 'None';
+    const category = catMap[b.CovCatNum] || "GENERAL";
+    const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
     const entry = { type, category, coverage_level };
-    if (type === 'CoInsurance') entry.percent = Number(b.Percent);
-    else if (type === 'Deductible') entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
-    else if (type === 'Frequency') {
+    if (type === "CoInsurance") entry.percent = Number(b.Percent);
+    else if (type === "Deductible")
+      entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
+    else if (type === "Frequency") {
       entry.quantity = b.Quantity;
-      entry.period = TIME_PERIOD[b.TimePeriod] || 'None';
+      entry.period = TIME_PERIOD[b.TimePeriod] || "None";
     }
     results.push(entry);
   }
-  return results.filter(b => b.type === 'CoInsurance' ? b.percent > 0 : true);
+  return results.filter((b) =>
+    b.type === "CoInsurance" ? b.percent > 0 : true,
+  );
 }
 
 async function syncODData() {
@@ -969,15 +1261,21 @@ async function syncODData() {
             // Source 1: OD REST API /insbenefits — reads the benefit table directly
             if (primaryPlan?.PlanNum) {
               try {
-                const rawBenefits = await odGet(`/insbenefits?InsPlanNum=${primaryPlan.PlanNum}`);
+                const rawBenefits = await odGet(
+                  `/insbenefits?InsPlanNum=${primaryPlan.PlanNum}`,
+                );
                 if (Array.isArray(rawBenefits) && rawBenefits.length > 0) {
                   benefits = mapOdApiBenefits(rawBenefits);
                   if (benefits.length > 0) {
-                    log(`[OD Benefits] ${benefits.length} benefits from REST API for PatNum ${apt.PatNum} (Plan ${primaryPlan.PlanNum})`);
+                    log(
+                      `[OD Benefits] ${benefits.length} benefits from REST API for PatNum ${apt.PatNum} (Plan ${primaryPlan.PlanNum})`,
+                    );
                   }
                 }
               } catch (e) {
-                log(`[OD Benefits] REST API failed for PatNum ${apt.PatNum}: ${e.message}`);
+                log(
+                  `[OD Benefits] REST API failed for PatNum ${apt.PatNum}: ${e.message}`,
+                );
               }
             }
 
@@ -987,11 +1285,15 @@ async function syncODData() {
                 if (await isMysqlAvailable()) {
                   benefits = await getBenefitsForPatient(apt.PatNum);
                   if (benefits.length > 0) {
-                    log(`[OD MySQL] ${benefits.length} benefits for PatNum ${apt.PatNum}`);
+                    log(
+                      `[OD MySQL] ${benefits.length} benefits for PatNum ${apt.PatNum}`,
+                    );
                   }
                 }
               } catch (e) {
-                log(`[OD MySQL] benefit query error for PatNum ${apt.PatNum}: ${e.message}`);
+                log(
+                  `[OD MySQL] benefit query error for PatNum ${apt.PatNum}: ${e.message}`,
+                );
               }
             }
 
@@ -1036,7 +1338,7 @@ async function syncODData() {
 // Reads today's appointments and patient insurance directly from MySQL,
 // then pushes to EDiFi Cloud so benefit breakdowns are populated without REST API.
 
-async function syncODMySql() {
+async function syncODMySql(syncDate) {
   if (!tunnelOk || !tunnel) {
     log("[OD MySQL Sync] Skipped — tunnel not connected");
     return;
@@ -1046,16 +1348,19 @@ async function syncODMySql() {
     return;
   }
 
+  const targetDate = syncDate || new Date().toISOString().slice(0, 10);
   od_sync_status.last_attempt_at = new Date().toISOString();
-  log("[OD MySQL Sync] Starting direct MySQL sync...");
+  log(`[OD MySQL Sync] Starting direct MySQL sync for ${targetDate}...`);
   try {
-    const apts = await getAppointmentsToday();
+    const apts = await getAppointmentsForDate(targetDate);
     if (apts.length === 0) {
-      log("[OD MySQL Sync] No scheduled appointments today");
+      log(`[OD MySQL Sync] No scheduled appointments for ${targetDate}`);
       return;
     }
 
-    log(`[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`);
+    log(
+      `[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`,
+    );
     const enriched = [];
     for (const apt of apts) {
       try {
@@ -1087,14 +1392,17 @@ async function syncODMySql() {
       return;
     }
 
-    const today = new Date().toISOString().slice(0, 10);
-    log(`[OD MySQL Sync] Pushing ${enriched.length} appointments to EDiFi Cloud...`);
-    tunnel.send(JSON.stringify({
-      type: "OD_DATA_PUSH",
-      date: today,
-      appointments: enriched,
-      source: "od_mysql",
-    }));
+    log(
+      `[OD MySQL Sync] Pushing ${enriched.length} appointments to EDiFi Cloud...`,
+    );
+    tunnel.send(
+      JSON.stringify({
+        type: "OD_DATA_PUSH",
+        date: targetDate,
+        appointments: enriched,
+        source: "od_mysql",
+      }),
+    );
     od_sync_status.last_success_at = new Date().toISOString();
     od_sync_status.last_error = null;
     od_sync_status.last_counts = { appointments: enriched.length };
