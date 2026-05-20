@@ -21,6 +21,7 @@ const {
   getAppointmentsForDate,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
+  getAppointmentProcedures,
   writeOdBenefits,
   setLogger: setMysqlLogger,
 } = require("./od-mysql");
@@ -768,29 +769,39 @@ async function handleWriteOdBenefits(commandId, payload) {
 async function handleGetSessionCookies(commandId, payload) {
   const payerCode = payload?.payer_code;
   if (!payerCode) {
-    sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'FAILED', null,
-      'MISSING_PAYER_CODE', 'payload.payer_code is required');
+    sendCommandResult(
+      commandId,
+      "GET_SESSION_COOKIES",
+      "FAILED",
+      null,
+      "MISSING_PAYER_CODE",
+      "payload.payer_code is required",
+    );
     return;
   }
 
   const session = getSession(config.office_id, payerCode);
   if (!session) {
-    sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'COMPLETED', {
+    sendCommandResult(commandId, "GET_SESSION_COOKIES", "COMPLETED", {
       payer_code: payerCode,
       available: false,
       cookies: null,
-      reason: 'No active session for this payer',
+      reason: "No active session for this payer",
     });
     return;
   }
 
   const ageMinutes = Math.round((Date.now() - session.at) / 60000);
-  const remainingMinutes = Math.round((SESSION_TTL - (Date.now() - session.at)) / 60000);
+  const remainingMinutes = Math.round(
+    (SESSION_TTL - (Date.now() - session.at)) / 60000,
+  );
 
   // Transmit cookies over encrypted WSS — never log values
-  log(`[Portal] GET_SESSION_COOKIES: sending ${session.cookies.length} cookies for ${payerCode} (age: ${ageMinutes}min, expires in: ${remainingMinutes}min)`);
+  log(
+    `[Portal] GET_SESSION_COOKIES: sending ${session.cookies.length} cookies for ${payerCode} (age: ${ageMinutes}min, expires in: ${remainingMinutes}min)`,
+  );
 
-  sendCommandResult(commandId, 'GET_SESSION_COOKIES', 'COMPLETED', {
+  sendCommandResult(commandId, "GET_SESSION_COOKIES", "COMPLETED", {
     payer_code: payerCode,
     available: true,
     cookies: session.cookies,
@@ -807,13 +818,18 @@ async function handleClearSessionCookies(commandId, payload) {
   if (payerCode) {
     sessions.delete(`${config.office_id}:${payerCode}`);
     log(`[Portal] CLEAR_SESSION_COOKIES: cleared session for ${payerCode}`);
-    sendCommandResult(commandId, 'CLEAR_SESSION_COOKIES', 'COMPLETED', { payer_code: payerCode, cleared: true });
+    sendCommandResult(commandId, "CLEAR_SESSION_COOKIES", "COMPLETED", {
+      payer_code: payerCode,
+      cleared: true,
+    });
   } else {
     // Clear all sessions
     const count = sessions.size;
     sessions.clear();
     log(`[Portal] CLEAR_SESSION_COOKIES: cleared all ${count} sessions`);
-    sendCommandResult(commandId, 'CLEAR_SESSION_COOKIES', 'COMPLETED', { cleared_count: count });
+    sendCommandResult(commandId, "CLEAR_SESSION_COOKIES", "COMPLETED", {
+      cleared_count: count,
+    });
   }
 }
 
@@ -1366,6 +1382,34 @@ async function syncODMySql(syncDate) {
       try {
         const snapshot = await getPatientInsuranceSnapshot(apt.PatNum);
         if (!snapshot) continue;
+
+        // Pull procedure fee estimates — fail-open so a missing procedurelog
+        // table or query error never blocks the insurance sync.
+        let procCodes = [];
+        let estPatientCents = 0;
+        let feeApptCents = 0;
+        try {
+          const procs = await getAppointmentProcedures(apt.AptNum);
+          if (procs.length > 0) {
+            procCodes = procs.map((pr) => pr.procedure_code);
+            estPatientCents = procs.reduce(
+              (s, pr) => s + pr.estimated_patient_portion_cents,
+              0,
+            );
+            feeApptCents = procs.reduce(
+              (s, pr) => s + pr.procedure_fee_cents,
+              0,
+            );
+            log(
+              `[OD MySQL Sync] Appointment procedure estimate collected (${procs.length} item(s))`,
+            );
+          }
+        } catch (procErr) {
+          log(
+            `[OD MySQL Sync] Procedure fetch skipped — continuing sync: ${procErr.message}`,
+          );
+        }
+
         enriched.push({
           AptNum: apt.AptNum,
           PatNum: apt.PatNum,
@@ -1380,6 +1424,9 @@ async function syncODMySql(syncDate) {
           },
           insurance: snapshot.plans,
           benefits: snapshot.benefits,
+          proc_codes: procCodes,
+          est_patient_cents: estPatientCents,
+          fee_appt_cents: feeApptCents,
           source: "od_mysql",
         });
       } catch (e) {

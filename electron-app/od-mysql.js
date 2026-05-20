@@ -386,6 +386,44 @@ async function getAppointmentsToday() {
   return getAppointmentsForDate(null);
 }
 
+// ─── Appointment Procedure Fees (read-only) ───────────────────────────────────
+// Returns sanitized procedure summaries for a specific appointment.
+// pat_est_amt = max(ProcFee - InsPayEst, 0) — conservative floor before
+// deductible. Does not include deductible contribution (no YTD usage here).
+// Returned objects contain no patient identifiers, dates, or clinical notes.
+
+async function getAppointmentProcedures(aptNum) {
+  const p = await getPool();
+  if (!p) return [];
+  try {
+    const [rows] = await p.query(
+      `SELECT
+         pc.ProcCode,
+         pc.AbbrDesc AS description,
+         ROUND(pl.ProcFee, 2)                                             AS proc_fee,
+         ROUND(GREATEST(pl.ProcFee - COALESCE(pl.InsPayEst, 0), 0), 2)  AS pat_est_amt
+       FROM procedurelog pl
+       JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum
+       WHERE pl.AptNum = ?
+         AND pl.ProcStatus IN (1, 2)`,
+      [aptNum],
+    );
+    return rows
+      .filter((r) => r.ProcCode && String(r.ProcCode).trim())
+      .map((r) => ({
+        procedure_code: String(r.ProcCode).trim(),
+        description: String(r.description || "").trim(),
+        procedure_fee_cents: Math.round(Number(r.proc_fee) * 100),
+        estimated_patient_portion_cents: Math.round(
+          Number(r.pat_est_amt) * 100,
+        ),
+      }));
+  } catch (e) {
+    logger(`getAppointmentProcedures error: ${e.message}`);
+    return [];
+  }
+}
+
 // ─── Full Patient Insurance + Benefit Snapshot ────────────────────────────────
 
 async function getPatientInsuranceSnapshot(patNum) {
@@ -581,7 +619,7 @@ async function writeOdBenefits(params) {
 
   if (plan_note) {
     try {
-      const existing = (existingPlan?.PlanNote ?? '').trim();
+      const existing = (existingPlan?.PlanNote ?? "").trim();
       // Deduplication: check if this date's entry is already in the plan note.
       // Plan note format: "5/18/26 EDiFi EDI. ..." — first 8 chars are the date prefix.
       const notePrefix = plan_note.substring(0, 8);
@@ -589,7 +627,10 @@ async function writeOdBenefits(params) {
       if (!alreadyWritten) {
         const newNote = existing ? `${existing}\n${plan_note}` : plan_note;
         if (!dry_run)
-          await p.query(`UPDATE insplan SET PlanNote = ? WHERE PlanNum = ?`, [newNote, PlanNum]);
+          await p.query(`UPDATE insplan SET PlanNote = ? WHERE PlanNum = ?`, [
+            newNote,
+            PlanNum,
+          ]);
         result.plan_note_updated = true;
       }
     } catch (e) {
@@ -613,6 +654,7 @@ module.exports = {
   getAppointmentsForDate,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
+  getAppointmentProcedures,
   writeOdBenefits,
   buildCovCatMap,
   setLogger,
