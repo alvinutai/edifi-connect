@@ -2301,7 +2301,8 @@ let tray = null;
 let setupWindow = null;
 
 function createTrayIcon() {
-  const iconPath = path.join(__dirname, "assets", "tray-icon.png");
+  const base = app.isPackaged ? process.resourcesPath : __dirname;
+  const iconPath = path.join(base, "assets", "tray-icon.png");
   return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
 }
 

@@ -55,7 +55,6 @@
       "od-mysql.js",
       "setup.html",
       "setup-preload.js",
-      "assets/**",
       "node_modules/**",
       "!node_modules/playwright/.local-browsers/**"
     ],
@@ -67,6 +66,10 @@
           "**/*",
           "!*.map"
         ]
+      },
+      {
+        "from": "assets",
+        "to": "assets"
       }
     ],
     "asar": true,
