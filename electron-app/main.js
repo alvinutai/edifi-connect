@@ -2300,23 +2300,9 @@ expressApp.get("/status", (_, res) =>
 let tray = null;
 let setupWindow = null;
 
-function createTrayIcon(status) {
-  const colors = {
-    connected: "#16a34a",
-    connecting: "#d97706",
-    error: "#dc2626",
-  };
-  const color = colors[status] || colors.error;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-    <rect width="32" height="32" rx="6" fill="${color}"/>
-    <text x="16" y="23" text-anchor="middle" font-family="Arial,sans-serif"
-          font-size="20" font-weight="bold" fill="white">E</text>
-  </svg>`;
-  return nativeImage
-    .createFromDataURL(
-      `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
-    )
-    .resize({ width: 16, height: 16 });
+function createTrayIcon() {
+  const iconPath = path.join(__dirname, "assets", "tray-icon.png");
+  return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
 }
 
 function updateTray() {
@@ -2533,7 +2519,7 @@ app.whenReady().then(() => {
 
   // Create tray
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
-  tray = new Tray(createTrayIcon("error"));
+  tray = new Tray(createTrayIcon());
   tray.setToolTip("EDiFi Connect");
   updateTray();
 

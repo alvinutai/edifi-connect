@@ -1,4 +1,4 @@
-# EDiFi Connect v2.3.7 — Staff Installation Instructions
+# EDiFi Connect v2.4.0 — Staff Installation Instructions
 
 **For: All Smiles Dentistry front desk or IT coordinator**  
 **Time required: approximately 3 minutes**  
@@ -15,7 +15,7 @@ This update replaces the old EDiFi Connect software with a new version that give
 ## Steps
 
 1. **Download the installer** by clicking the link EDF sent you.
-   The file will be named: `EDiFi Connect Setup 2.3.7.exe`
+   The file will be named: `EDiFi Connect Setup 2.4.0.exe`
 
 2. **Double-click the downloaded file** to run the installer.
 
@@ -27,7 +27,7 @@ This update replaces the old EDiFi Connect software with a new version that give
 
 4. **Wait about 30 seconds.** The installer runs automatically with no wizard or prompts.
 
-5. **You are done.** The EDiFi Connect icon will appear in your system tray (bottom-right corner of your screen). A green icon means it is connected.
+5. **You are done.** The EDiFi Connect icon (the blue EDF logo) will appear in your system tray (bottom-right corner of your screen). Hover over it to see connection status.
 
 ---
 
@@ -54,7 +54,7 @@ Do not attempt to uninstall or reinstall on your own.
 
 ## Rollback (EDF Internal Only)
 
-If v2.3.7 fails and v1.0.0 needs to be restored:
+If v2.4.0 fails and v1.0.0 needs to be restored:
 
 1. Kill Electron process: Task Manager → `EDiFi Connect.exe` → End Task
 2. Re-add Registry startup entry:

@@ -1,6 +1,6 @@
 {
   "name": "edifi-connect",
-  "version": "2.3.9",
+  "version": "2.4.0",
   "description": "EDiFi Connect — Bridges your dental office to EDiFi Cloud",
   "author": "Elite Dental Force Inc. <alvin@elitedentalforce.com>",
   "main": "main.js",
@@ -55,6 +55,7 @@
       "od-mysql.js",
       "setup.html",
       "setup-preload.js",
+      "assets/**",
       "node_modules/**",
       "!node_modules/playwright/.local-browsers/**"
     ],
