@@ -77,9 +77,22 @@ let configCache = null;
 let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
 let available = null; // null = unknown, true/false = tested
 let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
+let manualConfigOverride = null; // set by SET_MYSQL_CONFIG command — bypasses file scan
 
 function setLogger(fn) {
   logger = fn;
+}
+
+// Called by SET_MYSQL_CONFIG command — accepts manual MySQL credentials directly.
+// Resets connection state so the new config is tested on next isAvailable() call.
+function setManualMysqlConfig(cfg) {
+  if (!cfg || !cfg.host || !cfg.database || !cfg.user || !cfg.password) return;
+  manualConfigOverride = { ...cfg };
+  configCache = null;
+  available = null;
+  pool = null;
+  covCatCache = null;
+  logger(`Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`);
 }
 
 // Reset availability every 5 min so transient MySQL failures don't stick permanently
@@ -108,6 +121,12 @@ function parseXmlSimple(xml) {
 
 async function readOdConfig() {
   if (configCache) return configCache;
+
+  // Manual override takes precedence over file scan (set by SET_MYSQL_CONFIG command)
+  if (manualConfigOverride) {
+    configCache = { ...manualConfigOverride, configPath: "manual" };
+    return configCache;
+  }
 
   for (const cfgPath of OD_CONFIG_PATHS) {
     try {
@@ -658,4 +677,5 @@ module.exports = {
   writeOdBenefits,
   buildCovCatMap,
   setLogger,
+  setManualMysqlConfig,
 };

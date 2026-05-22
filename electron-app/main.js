@@ -24,6 +24,7 @@ const {
   getAppointmentProcedures,
   writeOdBenefits,
   setLogger: setMysqlLogger,
+  setManualMysqlConfig,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
 const { randomUUID, createHash } = require("crypto");
@@ -63,6 +64,9 @@ let config = {
   // Stable per-machine UUID — generated once and persisted. Never sent raw.
   // Only the SHA-256 hash is transmitted to the backend via AGENT_HELLO.
   machine_id: null,
+  // OD MySQL write-path credentials — set via SET_MYSQL_CONFIG remote command.
+  // Stored in config.json on the local machine only. Never transmitted in logs.
+  od_mysql: null,
 };
 
 // ─── Remote control state (never contains credentials or PHI) ─────────────────
@@ -98,6 +102,7 @@ const AGENT_CAPABILITIES = [
   "DOWNLOAD_UPDATE",
   "SYNC_OD_NOW",
   "WRITE_OD_BENEFITS",
+  "SET_MYSQL_CONFIG",
   "GET_SESSION_COOKIES",
   "CLEAR_SESSION_COOKIES",
   "RESTART_APP",
@@ -439,6 +444,9 @@ async function handleCommand(msg) {
       case "WRITE_OD_BENEFITS":
         await handleWriteOdBenefits(command_id, payload);
         break;
+      case "SET_MYSQL_CONFIG":
+        await handleSetMysqlConfig(command_id, payload);
+        break;
       case "GET_SESSION_COOKIES":
         await handleGetSessionCookies(command_id, payload);
         break;
@@ -695,6 +703,40 @@ async function handleSyncOdNow(commandId, payload) {
       "SYNC_ERROR",
       od_sync_status.last_error,
     );
+  }
+}
+
+// ── SET_MYSQL_CONFIG ──────────────────────────────────────────────────────────
+// Stores OD MySQL credentials locally in config.json and applies them immediately.
+// Password is NEVER logged. Only success/failure is reported in the result.
+
+async function handleSetMysqlConfig(commandId, payload) {
+  const { host, port, database, user, password } = payload ?? {};
+  if (!host || !database || !user || !password) {
+    sendCommandResult(
+      commandId, "SET_MYSQL_CONFIG", "FAILED", null,
+      "MISSING_FIELDS", "Required: host, database, user, password",
+    );
+    return;
+  }
+  try {
+    const mysqlCfg = { host, port: parseInt(port ?? "3306", 10), database, user, password };
+    setManualMysqlConfig(mysqlCfg);
+    // Persist to config.json — survives restarts
+    config.od_mysql = mysqlCfg;
+    saveConfig();
+    // Test connectivity immediately
+    const ok = await isMysqlAvailable().catch(() => false);
+    sendCommandResult(commandId, "SET_MYSQL_CONFIG", ok ? "COMPLETED" : "FAILED", {
+      mysql_host: host,
+      mysql_port: mysqlCfg.port,
+      mysql_database: database,
+      mysql_user: user,
+      mysql_reachable: ok,
+      config_persisted: true,
+    }, ok ? undefined : "MYSQL_UNREACHABLE", ok ? undefined : "Config saved but MySQL connection failed — check host/port/credentials");
+  } catch (e) {
+    sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null, "CONFIG_ERROR", e.message.slice(0, 200));
   }
 }
 
@@ -2470,6 +2512,9 @@ app.whenReady().then(() => {
 
   // Wire OD MySQL logger to main app log — failures now show in edifi-connect.log
   setMysqlLogger((msg) => log(`[OD MySQL] ${msg}`));
+
+  // If manual MySQL config was persisted by a prior SET_MYSQL_CONFIG command, apply it now.
+  if (config.od_mysql) setManualMysqlConfig(config.od_mysql);
 
   // Silent auto-update — checks GitHub on startup, downloads + installs with no user prompt.
   // Every future update after v2.3.0 is completely invisible to office staff.
