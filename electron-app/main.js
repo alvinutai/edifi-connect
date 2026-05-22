@@ -103,6 +103,7 @@ const AGENT_CAPABILITIES = [
   "SYNC_OD_NOW",
   "WRITE_OD_BENEFITS",
   "SET_MYSQL_CONFIG",
+  "SCAN_OD_MYSQL_HOSTS",
   "GET_SESSION_COOKIES",
   "CLEAR_SESSION_COOKIES",
   "RESTART_APP",
@@ -447,6 +448,9 @@ async function handleCommand(msg) {
       case "SET_MYSQL_CONFIG":
         await handleSetMysqlConfig(command_id, payload);
         break;
+      case "SCAN_OD_MYSQL_HOSTS":
+        await handleScanOdMysqlHosts(command_id);
+        break;
       case "GET_SESSION_COOKIES":
         await handleGetSessionCookies(command_id, payload);
         break;
@@ -711,21 +715,30 @@ async function handleSyncOdNow(commandId, payload) {
 // Password is NEVER logged. Only success/failure is reported in the result.
 
 async function handleSetMysqlConfig(commandId, payload) {
-  const { host, port, database, user, password } = payload ?? {};
-  if (!host || !database || !user || !password) {
-    sendCommandResult(
-      commandId, "SET_MYSQL_CONFIG", "FAILED", null,
-      "MISSING_FIELDS", "Required: host, database, user, password",
-    );
+  const { host, port, database, user } = payload ?? {};
+  let password = payload?.password;
+
+  // USE_PERSISTED: reuse password already saved in config.json — avoids re-entry for host-only changes
+  if (!password || password === "USE_PERSISTED") {
+    if (config.od_mysql && config.od_mysql.password) {
+      password = config.od_mysql.password;
+    } else {
+      sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null,
+        "MISSING_FIELDS", "No persisted password — provide password or run SET_MYSQL_CONFIG with full credentials first");
+      return;
+    }
+  }
+
+  if (!host || !database || !user) {
+    sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null,
+      "MISSING_FIELDS", "Required: host, database, user (password may be USE_PERSISTED)");
     return;
   }
   try {
     const mysqlCfg = { host, port: parseInt(port ?? "3306", 10), database, user, password };
     setManualMysqlConfig(mysqlCfg);
-    // Persist to config.json — survives restarts
     config.od_mysql = mysqlCfg;
     saveConfig();
-    // Test connectivity immediately
     const ok = await isMysqlAvailable().catch(() => false);
     sendCommandResult(commandId, "SET_MYSQL_CONFIG", ok ? "COMPLETED" : "FAILED", {
       mysql_host: host,
@@ -734,10 +747,137 @@ async function handleSetMysqlConfig(commandId, payload) {
       mysql_user: user,
       mysql_reachable: ok,
       config_persisted: true,
-    }, ok ? undefined : "MYSQL_UNREACHABLE", ok ? undefined : "Config saved but MySQL connection failed — check host/port/credentials");
+    }, ok ? undefined : "MYSQL_UNREACHABLE", ok ? undefined : "Config saved but MySQL connection failed");
   } catch (e) {
     sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null, "CONFIG_ERROR", e.message.slice(0, 200));
   }
+}
+
+// ── SCAN_OD_MYSQL_HOSTS ───────────────────────────────────────────────────────
+// Read-only network and config scan to discover the OD MySQL host.
+// Returns: local IPs, netstat port-3306 listeners, OD config file paths (no contents),
+// and TCP reachability results for subnet candidates.
+// Never returns passwords, raw config file contents, or PHI.
+
+async function handleScanOdMysqlHosts(commandId) {
+  const osModule = require("os");
+  const { execSync } = require("child_process");
+  const net = require("net");
+  const fs = require("fs");
+
+  const result = {
+    local_ips: [],
+    port_3306_listeners: [],
+    od_config_paths_found: [],
+    od_config_host: null,
+    od_config_port: null,
+    od_config_database: null,
+    od_config_user: null,
+    od_config_has_plaintext_password: null,
+    od_config_has_hashed_password: null,
+    mysql_service_running: false,
+    tcp_reachable_hosts: [],
+    error: null,
+  };
+
+  // 1. Local LAN IPs
+  try {
+    const nets = osModule.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const iface of nets[name]) {
+        if (iface.family === "IPv4" && !iface.internal) {
+          result.local_ips.push(iface.address);
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Read OD config file — extract host/port/db/user ONLY, never password
+  const OD_CONFIG_PATHS = [
+    "C:\\OpenDental\\FreeDentalConfig.xml",
+    "C:\\Program Files (x86)\\Open Dental\\FreeDentalConfig.xml",
+    "C:\\Program Files\\Open Dental\\FreeDentalConfig.xml",
+    (process.env.LOCALAPPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
+    (process.env.APPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
+  ];
+  for (const cfgPath of OD_CONFIG_PATHS) {
+    try {
+      if (!fs.existsSync(cfgPath)) continue;
+      result.od_config_paths_found.push(cfgPath);
+      const xml = fs.readFileSync(cfgPath, "utf8");
+      const get = (keys) => {
+        for (const k of keys) {
+          const m = xml.match(new RegExp("<" + k + ">([^<]*)<\\/" + k + ">", "i"));
+          if (m && m[1].trim()) return m[1].trim();
+        }
+        return null;
+      };
+      result.od_config_host     = get(["DatabaseServer","ComputerName","Server"]);
+      result.od_config_port     = get(["DatabasePort","Port"]) || "3306";
+      result.od_config_database = get(["Database","DbName"]);
+      result.od_config_user     = get(["DatabaseUser","DbUser","User"]);
+      // boolean only — never the value
+      result.od_config_has_plaintext_password = !!(get(["DatabasePassword","DbPassword","Password"]));
+      result.od_config_has_hashed_password    = !!(get(["MySqlPassHash","DatabasePasswordHash"]));
+      break;
+    } catch {}
+  }
+
+  // 3. Netstat — find what is listening on port 3306
+  try {
+    const out = execSync("netstat -an 2>nul", { encoding: "utf8", timeout: 5000, shell: true });
+    for (const line of out.split("\n")) {
+      if (line.includes(":3306") && line.toLowerCase().includes("listening")) {
+        const m = line.match(/(\d+\.\d+\.\d+\.\d+):3306/);
+        if (m) result.port_3306_listeners.push(m[1]);
+      }
+    }
+  } catch {}
+
+  // 4. Windows service scan — is MySQL/MariaDB running?
+  try {
+    const svc = execSync(
+      'sc query type= all state= all 2>nul | findstr /i "mysql mariadb"',
+      { encoding: "utf8", timeout: 5000, shell: true }
+    );
+    result.mysql_service_running = svc.trim().length > 0;
+  } catch {}
+
+  // 5. TCP probe — build candidate list from local IPs + netstat listeners + od_config_host
+  const candidates = new Set();
+  for (const ip of result.local_ips) {
+    candidates.add(ip);
+    const parts = ip.split(".");
+    if (parts.length === 4) {
+      const subnet = parts.slice(0, 3).join(".");
+      for (const last of ["1", "2", "100", "200", "254"]) {
+        candidates.add(`${subnet}.${last}`);
+      }
+    }
+  }
+  for (const ip of result.port_3306_listeners) candidates.add(ip);
+  if (result.od_config_host && result.od_config_host !== "localhost" && result.od_config_host !== "127.0.0.1") {
+    candidates.add(result.od_config_host);
+  }
+
+  // TCP probe each candidate — connect only, no queries, no data
+  const probePort = parseInt(result.od_config_port || "3306", 10);
+  const probes = Array.from(candidates).map((host) => {
+    return new Promise((resolve) => {
+      const sock = new net.Socket();
+      sock.setTimeout(2000);
+      sock.connect(probePort, host, () => {
+        sock.destroy();
+        result.tcp_reachable_hosts.push(`${host}:${probePort}`);
+        resolve();
+      });
+      sock.on("error", () => { sock.destroy(); resolve(); });
+      sock.on("timeout", () => { sock.destroy(); resolve(); });
+    });
+  });
+  await Promise.all(probes);
+
+  sendCommandResult(commandId, "SCAN_OD_MYSQL_HOSTS", "COMPLETED", result);
 }
 
 // ── WRITE_OD_BENEFITS ─────────────────────────────────────────────────────────
