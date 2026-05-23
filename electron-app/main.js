@@ -104,6 +104,7 @@ const AGENT_CAPABILITIES = [
   "WRITE_OD_BENEFITS",
   "SET_MYSQL_CONFIG",
   "SCAN_OD_MYSQL_HOSTS",
+  "TEST_MYSQL_CONNECTION",
   "GET_SESSION_COOKIES",
   "CLEAR_SESSION_COOKIES",
   "RESTART_APP",
@@ -451,6 +452,9 @@ async function handleCommand(msg) {
       case "SCAN_OD_MYSQL_HOSTS":
         await handleScanOdMysqlHosts(command_id);
         break;
+      case "TEST_MYSQL_CONNECTION":
+        await handleTestMysqlConnection(command_id, payload);
+        break;
       case "GET_SESSION_COOKIES":
         await handleGetSessionCookies(command_id, payload);
         break;
@@ -723,33 +727,65 @@ async function handleSetMysqlConfig(commandId, payload) {
     if (config.od_mysql && config.od_mysql.password) {
       password = config.od_mysql.password;
     } else {
-      sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null,
-        "MISSING_FIELDS", "No persisted password — provide password or run SET_MYSQL_CONFIG with full credentials first");
+      sendCommandResult(
+        commandId,
+        "SET_MYSQL_CONFIG",
+        "FAILED",
+        null,
+        "MISSING_FIELDS",
+        "No persisted password — provide password or run SET_MYSQL_CONFIG with full credentials first",
+      );
       return;
     }
   }
 
   if (!host || !database || !user) {
-    sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null,
-      "MISSING_FIELDS", "Required: host, database, user (password may be USE_PERSISTED)");
+    sendCommandResult(
+      commandId,
+      "SET_MYSQL_CONFIG",
+      "FAILED",
+      null,
+      "MISSING_FIELDS",
+      "Required: host, database, user (password may be USE_PERSISTED)",
+    );
     return;
   }
   try {
-    const mysqlCfg = { host, port: parseInt(port ?? "3306", 10), database, user, password };
+    const mysqlCfg = {
+      host,
+      port: parseInt(port ?? "3306", 10),
+      database,
+      user,
+      password,
+    };
     setManualMysqlConfig(mysqlCfg);
     config.od_mysql = mysqlCfg;
     saveConfig();
     const ok = await isMysqlAvailable().catch(() => false);
-    sendCommandResult(commandId, "SET_MYSQL_CONFIG", ok ? "COMPLETED" : "FAILED", {
-      mysql_host: host,
-      mysql_port: mysqlCfg.port,
-      mysql_database: database,
-      mysql_user: user,
-      mysql_reachable: ok,
-      config_persisted: true,
-    }, ok ? undefined : "MYSQL_UNREACHABLE", ok ? undefined : "Config saved but MySQL connection failed");
+    sendCommandResult(
+      commandId,
+      "SET_MYSQL_CONFIG",
+      ok ? "COMPLETED" : "FAILED",
+      {
+        mysql_host: host,
+        mysql_port: mysqlCfg.port,
+        mysql_database: database,
+        mysql_user: user,
+        mysql_reachable: ok,
+        config_persisted: true,
+      },
+      ok ? undefined : "MYSQL_UNREACHABLE",
+      ok ? undefined : "Config saved but MySQL connection failed",
+    );
   } catch (e) {
-    sendCommandResult(commandId, "SET_MYSQL_CONFIG", "FAILED", null, "CONFIG_ERROR", e.message.slice(0, 200));
+    sendCommandResult(
+      commandId,
+      "SET_MYSQL_CONFIG",
+      "FAILED",
+      null,
+      "CONFIG_ERROR",
+      e.message.slice(0, 200),
+    );
   }
 }
 
@@ -807,25 +843,38 @@ async function handleScanOdMysqlHosts(commandId) {
       const xml = fs.readFileSync(cfgPath, "utf8");
       const get = (keys) => {
         for (const k of keys) {
-          const m = xml.match(new RegExp("<" + k + ">([^<]*)<\\/" + k + ">", "i"));
+          const m = xml.match(
+            new RegExp("<" + k + ">([^<]*)<\\/" + k + ">", "i"),
+          );
           if (m && m[1].trim()) return m[1].trim();
         }
         return null;
       };
-      result.od_config_host     = get(["DatabaseServer","ComputerName","Server"]);
-      result.od_config_port     = get(["DatabasePort","Port"]) || "3306";
-      result.od_config_database = get(["Database","DbName"]);
-      result.od_config_user     = get(["DatabaseUser","DbUser","User"]);
+      result.od_config_host = get(["DatabaseServer", "ComputerName", "Server"]);
+      result.od_config_port = get(["DatabasePort", "Port"]) || "3306";
+      result.od_config_database = get(["Database", "DbName"]);
+      result.od_config_user = get(["DatabaseUser", "DbUser", "User"]);
       // boolean only — never the value
-      result.od_config_has_plaintext_password = !!(get(["DatabasePassword","DbPassword","Password"]));
-      result.od_config_has_hashed_password    = !!(get(["MySqlPassHash","DatabasePasswordHash"]));
+      result.od_config_has_plaintext_password = !!get([
+        "DatabasePassword",
+        "DbPassword",
+        "Password",
+      ]);
+      result.od_config_has_hashed_password = !!get([
+        "MySqlPassHash",
+        "DatabasePasswordHash",
+      ]);
       break;
     } catch {}
   }
 
   // 3. Netstat — find what is listening on port 3306
   try {
-    const out = execSync("netstat -an 2>nul", { encoding: "utf8", timeout: 5000, shell: true });
+    const out = execSync("netstat -an 2>nul", {
+      encoding: "utf8",
+      timeout: 5000,
+      shell: true,
+    });
     for (const line of out.split("\n")) {
       if (line.includes(":3306") && line.toLowerCase().includes("listening")) {
         const m = line.match(/(\d+\.\d+\.\d+\.\d+):3306/);
@@ -838,7 +887,7 @@ async function handleScanOdMysqlHosts(commandId) {
   try {
     const svc = execSync(
       'sc query type= all state= all 2>nul | findstr /i "mysql mariadb"',
-      { encoding: "utf8", timeout: 5000, shell: true }
+      { encoding: "utf8", timeout: 5000, shell: true },
     );
     result.mysql_service_running = svc.trim().length > 0;
   } catch {}
@@ -856,7 +905,11 @@ async function handleScanOdMysqlHosts(commandId) {
     }
   }
   for (const ip of result.port_3306_listeners) candidates.add(ip);
-  if (result.od_config_host && result.od_config_host !== "localhost" && result.od_config_host !== "127.0.0.1") {
+  if (
+    result.od_config_host &&
+    result.od_config_host !== "localhost" &&
+    result.od_config_host !== "127.0.0.1"
+  ) {
     candidates.add(result.od_config_host);
   }
 
@@ -871,13 +924,136 @@ async function handleScanOdMysqlHosts(commandId) {
         result.tcp_reachable_hosts.push(`${host}:${probePort}`);
         resolve();
       });
-      sock.on("error", () => { sock.destroy(); resolve(); });
-      sock.on("timeout", () => { sock.destroy(); resolve(); });
+      sock.on("error", () => {
+        sock.destroy();
+        resolve();
+      });
+      sock.on("timeout", () => {
+        sock.destroy();
+        resolve();
+      });
     });
   });
   await Promise.all(probes);
 
   sendCommandResult(commandId, "SCAN_OD_MYSQL_HOSTS", "COMPLETED", result);
+}
+
+// ── TEST_MYSQL_CONNECTION ─────────────────────────────────────────────────────
+// Tests MySQL credentials WITHOUT persisting config to disk or changing in-memory state.
+// Returns the real MySQL error code so the caller knows exactly what is failing.
+// Password is never returned or logged.
+
+async function handleTestMysqlConnection(commandId, payload) {
+  const { host, port, database, user } = payload ?? {};
+  let password = payload?.password;
+
+  if (!password || password === "USE_PERSISTED") {
+    if (config.od_mysql && config.od_mysql.password) {
+      password = config.od_mysql.password;
+    } else {
+      sendCommandResult(commandId, "TEST_MYSQL_CONNECTION", "COMPLETED", {
+        tcp_connected: false,
+        authenticated: false,
+        database_selected: false,
+        error_code: "NO_PERSISTED_PASSWORD",
+        safe_error_message:
+          "No persisted password in config. Provide password or run SET_MYSQL_CONFIG first.",
+      });
+      return;
+    }
+  }
+
+  if (!host || !database || !user) {
+    sendCommandResult(commandId, "TEST_MYSQL_CONNECTION", "COMPLETED", {
+      tcp_connected: false,
+      authenticated: false,
+      database_selected: false,
+      error_code: "MISSING_FIELDS",
+      safe_error_message: "Required: host, database, user",
+    });
+    return;
+  }
+
+  let tcp_connected = false;
+  let authenticated = false;
+  let database_selected = false;
+  let error_code = null;
+  let safe_error_message = null;
+
+  // Step 1: raw TCP probe — no MySQL protocol, no credentials
+  try {
+    await new Promise((resolve, reject) => {
+      const net = require("net");
+      const sock = new net.Socket();
+      sock.setTimeout(5000);
+      sock.connect(parseInt(port ?? "3306", 10), host, () => {
+        tcp_connected = true;
+        sock.destroy();
+        resolve();
+      });
+      sock.on("error", (e) => {
+        sock.destroy();
+        reject(e);
+      });
+      sock.on("timeout", () => {
+        sock.destroy();
+        reject(new Error("TCP_TIMEOUT"));
+      });
+    });
+  } catch (e) {
+    error_code = e.message === "TCP_TIMEOUT" ? "TCP_TIMEOUT" : "TCP_REFUSED";
+    safe_error_message =
+      error_code === "TCP_TIMEOUT"
+        ? `TCP timeout on ${host}:${port ?? 3306}`
+        : `TCP refused on ${host}:${port ?? 3306}`;
+    sendCommandResult(commandId, "TEST_MYSQL_CONNECTION", "COMPLETED", {
+      tcp_connected,
+      authenticated,
+      database_selected,
+      error_code,
+      safe_error_message,
+    });
+    return;
+  }
+
+  // Step 2: MySQL auth — single temp connection, NEVER saves to disk, NEVER modifies config
+  try {
+    const mysql = require("mysql2/promise");
+    const conn = await mysql.createConnection({
+      host,
+      port: parseInt(port ?? "3306", 10),
+      database,
+      user,
+      password,
+      connectTimeout: 8000,
+    });
+    authenticated = true;
+    await conn.query("SELECT 1");
+    database_selected = true;
+    await conn.end();
+  } catch (e) {
+    const code = e.code || e.sqlState || "UNKNOWN";
+    error_code = code;
+    const msgs = {
+      ER_ACCESS_DENIED_ERROR:
+        "Access denied — wrong user or password for this host",
+      ER_BAD_DB_ERROR: "Database not found — check database name",
+      ER_NOT_SUPPORTED_AUTH_MODE:
+        "Auth plugin unsupported — MySQL may need native_password",
+      ECONNREFUSED: "Connection refused",
+      ETIMEDOUT: "Connection timed out",
+    };
+    safe_error_message = msgs[code] ?? `MySQL error: ${code}`;
+  }
+
+  sendCommandResult(commandId, "TEST_MYSQL_CONNECTION", "COMPLETED", {
+    tcp_connected,
+    authenticated,
+    database_selected,
+    error_code,
+    safe_error_message,
+  });
 }
 
 // ── WRITE_OD_BENEFITS ─────────────────────────────────────────────────────────
@@ -1274,6 +1450,27 @@ async function odGet(path) {
   }
 }
 
+// Fetches all operatories once per sync and returns { operatoryNum → name }.
+// Fail-open — returns empty map so a missing endpoint never blocks the sync.
+async function getOperatoryMap() {
+  try {
+    const ops = await odGet("/operatories");
+    if (!Array.isArray(ops)) return {};
+    const map = {};
+    for (const op of ops) {
+      const num = Number(op.OperatoryNum);
+      if (num > 0) {
+        map[num] = op.OpName || op.Abbrev || `Op ${num}`;
+      }
+    }
+    log(`[OD Sync] Operatory map: ${Object.keys(map).length} entries`);
+    return map;
+  } catch (e) {
+    log(`[OD Sync] Operatory map fetch failed: ${e.message}`);
+    return {};
+  }
+}
+
 // Maps raw OD REST API /insbenefits entries to EDiFi benefit format.
 // OD BenefitType 6 = CoInsurance (plan pays X%), 4 = Deductible, 1 = Frequency.
 // CovCatNum default mapping assumes standard OD category sequence.
@@ -1417,6 +1614,9 @@ async function syncODData() {
     // Pre-warm coverage category cache so benefit mapping is accurate
     await getOdCovCats();
 
+    // Fetch operatory names once — used to label appointment cards correctly
+    const operatoryMap = await getOperatoryMap();
+
     // 2. For each appointment, fetch patient + insurance (batch of 3)
     const enriched = [];
     const BATCH = 3;
@@ -1495,11 +1695,43 @@ async function syncODData() {
               }
             }
 
+            // Pull procedure codes and fee totals for the appointment card.
+            // Fail-open — a missing procedurelog never blocks the insurance sync.
+            let procCodes = [];
+            let feeApptCents = 0;
+            let estPatientCents = 0;
+            try {
+              const procs = await odGet(`/procedurelog?AptNum=${apt.AptNum}`);
+              if (Array.isArray(procs)) {
+                for (const p of procs) {
+                  if (p.ProcCode) procCodes.push(p.ProcCode);
+                  feeApptCents += Math.round((Number(p.ProcFee) || 0) * 100);
+                  estPatientCents += Math.round(
+                    (Number(p.PatPortion) || 0) * 100,
+                  );
+                }
+                if (procCodes.length > 0) {
+                  log(
+                    `[OD Sync] ${procCodes.length} procedures for AptNum ${apt.AptNum}: ${procCodes.join(", ")}`,
+                  );
+                }
+              }
+            } catch (e) {
+              log(
+                `[OD Sync] Procedure fetch skipped for AptNum ${apt.AptNum}: ${e.message}`,
+              );
+            }
+
             return {
               ...apt,
               patient,
               insurance: { patPlans, insSubs, insPlans, carriers },
               benefits,
+              operatory_name: operatoryMap[Number(apt.OperatoryNum)] ?? null,
+              note: apt.Note ?? null,
+              proc_codes: procCodes,
+              fee_appt_cents: feeApptCents,
+              est_patient_cents: estPatientCents,
             };
           } catch (e) {
             log(`[OD Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
