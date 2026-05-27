@@ -691,7 +691,7 @@ async function handleSyncOdNow(commandId, payload) {
     if (mysqlOk) {
       await syncODMySql(syncDate);
     } else {
-      await syncODData();
+      await syncODData(syncDate);
     }
 
     od_sync_status.last_success_at = new Date().toISOString();
@@ -1587,14 +1587,14 @@ function mapOdApiBenefits(rawBenefits) {
   );
 }
 
-async function syncODData() {
+async function syncODData(syncDate = null) {
   if (!config.od_api_url || !config.office_id) return;
   if (!tunnelOk || !tunnel) {
     log("[OD Sync] Skipped — tunnel not connected");
     return;
   }
 
-  const today = new Date().toISOString().split("T")[0];
+  const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
   try {
