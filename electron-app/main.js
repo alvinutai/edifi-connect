@@ -1424,14 +1424,16 @@ function connectTunnel() {
 
 function odAuthHeader() {
   if (config.od_customer_key) {
-    return { Authorization: `ODFHIR ${OD_DEV_KEY} ${config.od_customer_key}` };
+    return { Authorization: `ODFHIR ${OD_DEV_KEY}/${config.od_customer_key}` };
   }
   return {};
 }
 
 async function odGet(path) {
-  const base = config.od_api_url;
-  if (!base) return null;
+  const rawBase = config.od_api_url;
+  if (!rawBase) return null;
+  const trimmed = rawBase.replace(/\/+$/, "");
+  const base = trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
   try {
     const axios = require("axios");
     const r = await axios.get(`${base}${path}`, {
