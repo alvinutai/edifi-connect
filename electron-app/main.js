@@ -86,6 +86,7 @@ const od_sync_status = {
   last_success_at: null,
   last_error: null,
   last_counts: null,
+  last_auth_error: null, // "AUTH_REJECTED_401" | "ECONNECTOR_NOT_RUNNING" | null
 };
 
 // ─── Hardcoded capability list ────────────────────────────────────────────────
@@ -104,6 +105,7 @@ const AGENT_CAPABILITIES = [
   "WRITE_OD_BENEFITS",
   "SET_MYSQL_CONFIG",
   "SET_OD_CUSTOMER_KEY",
+  "TEST_OD_REST_AUTH",
   "SCAN_OD_MYSQL_HOSTS",
   "TEST_MYSQL_CONNECTION",
   "GET_SESSION_COOKIES",
@@ -453,6 +455,9 @@ async function handleCommand(msg) {
       case "SET_OD_CUSTOMER_KEY":
         await handleSetOdCustomerKey(command_id, payload);
         break;
+      case "TEST_OD_REST_AUTH":
+        await handleTestOdRestAuth(command_id);
+        break;
       case "SCAN_OD_MYSQL_HOSTS":
         await handleScanOdMysqlHosts(command_id);
         break;
@@ -561,11 +566,24 @@ async function handleReportStatus(commandId) {
 
 async function handleReportConfigStatus(commandId) {
   const mysqlOk = await isMysqlAvailable().catch(() => false);
+  const { createHash } = require("crypto");
+  const keyFingerprint = config.od_customer_key
+    ? {
+        length: config.od_customer_key.length,
+        first4: config.od_customer_key.slice(0, 4),
+        last4: config.od_customer_key.slice(-4),
+        sha256_prefix_12: createHash("sha256")
+          .update(config.od_customer_key)
+          .digest("hex")
+          .slice(0, 12),
+      }
+    : null;
   const result = {
     office_id_present: !!config.office_id,
     api_key_present: !!config.api_key,
     od_api_url_present: !!config.od_api_url,
     od_customer_key_present: !!config.od_customer_key,
+    od_customer_key_fingerprint: keyFingerprint,
     od_mysql_config_present: mysqlOk,
     machine_id_present: !!config.machine_id,
     portal_sessions_count: activeSessions().length,
@@ -704,6 +722,7 @@ async function handleSyncOdNow(commandId, payload) {
     sendCommandResult(commandId, "SYNC_OD_NOW", "COMPLETED", {
       sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
       completed_at: od_sync_status.last_success_at,
+      last_auth_error: od_sync_status.last_auth_error ?? null,
     });
   } catch (e) {
     od_sync_status.last_error = e.message.slice(0, 200);
@@ -820,6 +839,77 @@ async function handleSetOdCustomerKey(commandId, payload) {
   });
 }
 
+// ── TEST_OD_REST_AUTH ─────────────────────────────────────────────────────────
+// Non-PHI auth probe. Calls /operatories only — no patient data.
+// Returns HTTP status, auth result, and eConnector reachability.
+// Never returns response body, key values, or URL.
+
+async function handleTestOdRestAuth(commandId) {
+  if (!config.od_api_url) {
+    sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+      econnector_reachable: false,
+      auth_accepted: false,
+      http_status: null,
+      error_category: "OD_API_URL_NOT_CONFIGURED",
+    });
+    return;
+  }
+  if (!config.od_customer_key) {
+    sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+      econnector_reachable: false,
+      auth_accepted: false,
+      http_status: null,
+      error_category: "OD_CUSTOMER_KEY_NOT_SET",
+    });
+    return;
+  }
+
+  const trimmed = config.od_api_url.replace(/\/+$/, "");
+  const base = trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
+
+  let http_status = null;
+  let econnector_reachable = false;
+  let auth_accepted = false;
+  let error_category = null;
+
+  try {
+    const axios = require("axios");
+    const r = await axios.get(`${base}/operatories`, {
+      timeout: 8000,
+      headers: odAuthHeader(),
+    });
+    // r.data intentionally discarded — response body never returned
+    http_status = r.status;
+    econnector_reachable = true;
+    auth_accepted = true;
+  } catch (e) {
+    if (e.response) {
+      http_status = e.response.status;
+      econnector_reachable = true;
+      auth_accepted = false;
+      error_category =
+        e.response.status === 401
+          ? "AUTH_REJECTED_401"
+          : e.response.status === 403
+            ? "AUTH_FORBIDDEN_403"
+            : `HTTP_ERROR_${e.response.status}`;
+    } else if (e.code === "ECONNREFUSED") {
+      error_category = "ECONNECTOR_NOT_RUNNING";
+    } else if (e.code === "ETIMEDOUT" || e.message?.includes("timeout")) {
+      error_category = "CONNECTION_TIMEOUT";
+    } else {
+      error_category = "CONNECTION_FAILED";
+    }
+  }
+
+  sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+    econnector_reachable,
+    auth_accepted,
+    http_status,
+    error_category,
+  });
+}
+
 // ── SCAN_OD_MYSQL_HOSTS ───────────────────────────────────────────────────────
 // Read-only network and config scan to discover the OD MySQL host.
 // Returns: local IPs, netstat port-3306 listeners, OD config file paths (no contents),
@@ -843,6 +933,7 @@ async function handleScanOdMysqlHosts(commandId) {
     od_config_has_plaintext_password: null,
     od_config_has_hashed_password: null,
     mysql_service_running: false,
+    od_econnector_services: [],
     tcp_reachable_hosts: [],
     error: null,
   };
@@ -914,7 +1005,7 @@ async function handleScanOdMysqlHosts(commandId) {
     }
   } catch {}
 
-  // 4. Windows service scan — is MySQL/MariaDB running?
+  // 4. Windows service scan — MySQL/MariaDB + Open Dental eConnector
   try {
     const svc = execSync(
       'sc query type= all state= all 2>nul | findstr /i "mysql mariadb"',
@@ -922,6 +1013,22 @@ async function handleScanOdMysqlHosts(commandId) {
     );
     result.mysql_service_running = svc.trim().length > 0;
   } catch {}
+
+  // 4b. Open Dental eConnector service discovery — read-only, no restart
+  try {
+    const odSvcRaw = execSync(
+      'sc query type= all state= all 2>nul | findstr /i "opendental econnector dental"',
+      { encoding: "utf8", timeout: 5000, shell: true },
+    );
+    const names = [];
+    for (const line of odSvcRaw.split("\n")) {
+      const m = line.match(/SERVICE_NAME:\s+(\S+)/i);
+      if (m && m[1]) names.push(m[1].trim());
+    }
+    result.od_econnector_services = names;
+  } catch {
+    result.od_econnector_services = [];
+  }
 
   // 5. TCP probe — build candidate list from local IPs + netstat listeners + od_config_host
   const candidates = new Set();
@@ -1471,12 +1578,20 @@ async function odGet(path) {
       timeout: 8000,
       headers: odAuthHeader(),
     });
+    od_sync_status.last_auth_error = null;
     return r.data;
   } catch (e) {
     if (e.response?.status === 404) return null;
     if (e.response?.status === 401) {
       log(`[OD] Auth failed — check OD customer key in settings`);
+      od_sync_status.last_auth_error = "AUTH_REJECTED_401";
       return null;
+    }
+    if (e.code === "ECONNREFUSED") {
+      od_sync_status.last_auth_error = "ECONNECTOR_NOT_RUNNING";
+    } else {
+      // Timeout, DNS failure, or other non-auth error — don't carry stale auth state
+      od_sync_status.last_auth_error = null;
     }
     log(`[OD] GET ${path} failed: ${e.message}`);
     return null;
