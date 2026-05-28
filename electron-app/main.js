@@ -103,6 +103,7 @@ const AGENT_CAPABILITIES = [
   "SYNC_OD_NOW",
   "WRITE_OD_BENEFITS",
   "SET_MYSQL_CONFIG",
+  "SET_OD_CUSTOMER_KEY",
   "SCAN_OD_MYSQL_HOSTS",
   "TEST_MYSQL_CONNECTION",
   "GET_SESSION_COOKIES",
@@ -449,6 +450,9 @@ async function handleCommand(msg) {
       case "SET_MYSQL_CONFIG":
         await handleSetMysqlConfig(command_id, payload);
         break;
+      case "SET_OD_CUSTOMER_KEY":
+        await handleSetOdCustomerKey(command_id, payload);
+        break;
       case "SCAN_OD_MYSQL_HOSTS":
         await handleScanOdMysqlHosts(command_id);
         break;
@@ -787,6 +791,33 @@ async function handleSetMysqlConfig(commandId, payload) {
       e.message.slice(0, 200),
     );
   }
+}
+
+// ── SET_OD_CUSTOMER_KEY ────────────────────────────────────────────────────────
+// Writes the OD customer API key to local config.json.
+// The key is NEVER logged. Returns boolean presence only.
+
+async function handleSetOdCustomerKey(commandId, payload) {
+  const key =
+    typeof payload?.od_customer_key === "string"
+      ? payload.od_customer_key.trim()
+      : "";
+  if (!key) {
+    sendCommandResult(
+      commandId,
+      "SET_OD_CUSTOMER_KEY",
+      "FAILED",
+      null,
+      "MISSING_FIELDS",
+      "od_customer_key is required and must be a non-empty string",
+    );
+    return;
+  }
+  config.od_customer_key = key;
+  saveConfig();
+  sendCommandResult(commandId, "SET_OD_CUSTOMER_KEY", "COMPLETED", {
+    od_customer_key_present: true,
+  });
 }
 
 // ── SCAN_OD_MYSQL_HOSTS ───────────────────────────────────────────────────────
