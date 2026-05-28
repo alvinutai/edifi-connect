@@ -106,6 +106,7 @@ const AGENT_CAPABILITIES = [
   "SET_MYSQL_CONFIG",
   "SET_OD_CUSTOMER_KEY",
   "TEST_OD_REST_AUTH",
+  "SET_OD_API_URL",
   "START_OD_ECONNECTOR",
   "SCAN_OD_MYSQL_HOSTS",
   "TEST_MYSQL_CONNECTION",
@@ -458,6 +459,9 @@ async function handleCommand(msg) {
         break;
       case "TEST_OD_REST_AUTH":
         await handleTestOdRestAuth(command_id);
+        break;
+      case "SET_OD_API_URL":
+        await handleSetOdApiUrl(command_id, payload);
         break;
       case "START_OD_ECONNECTOR":
         await handleStartOdEConnector(command_id);
@@ -911,6 +915,23 @@ async function handleTestOdRestAuth(commandId) {
     auth_accepted,
     http_status,
     error_category,
+  });
+}
+
+// ── SET_OD_API_URL ────────────────────────────────────────────────────────────
+// Sets the Open Dental API URL in local config. No credentials stored.
+
+async function handleSetOdApiUrl(commandId, payload) {
+  const url = typeof payload?.od_api_url === "string" ? payload.od_api_url.trim() : "";
+  if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+    sendCommandResult(commandId, "SET_OD_API_URL", "FAILED", null, "INVALID_URL",
+      "od_api_url required and must start with http:// or https://");
+    return;
+  }
+  config.od_api_url = url;
+  saveConfig();
+  sendCommandResult(commandId, "SET_OD_API_URL", "COMPLETED", {
+    od_api_url_present: !!config.od_api_url,
   });
 }
 
