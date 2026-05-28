@@ -106,6 +106,7 @@ const AGENT_CAPABILITIES = [
   "SET_MYSQL_CONFIG",
   "SET_OD_CUSTOMER_KEY",
   "TEST_OD_REST_AUTH",
+  "START_OD_ECONNECTOR",
   "SCAN_OD_MYSQL_HOSTS",
   "TEST_MYSQL_CONNECTION",
   "GET_SESSION_COOKIES",
@@ -457,6 +458,9 @@ async function handleCommand(msg) {
         break;
       case "TEST_OD_REST_AUTH":
         await handleTestOdRestAuth(command_id);
+        break;
+      case "START_OD_ECONNECTOR":
+        await handleStartOdEConnector(command_id);
         break;
       case "SCAN_OD_MYSQL_HOSTS":
         await handleScanOdMysqlHosts(command_id);
@@ -908,6 +912,83 @@ async function handleTestOdRestAuth(commandId) {
     http_status,
     error_category,
   });
+}
+
+// ── START_OD_ECONNECTOR ───────────────────────────────────────────────────────
+// Starts the Open Dental eConnector Windows service if stopped.
+// Sets service to auto-start so it survives reboots.
+// Fails gracefully if admin rights are insufficient.
+
+async function handleStartOdEConnector(commandId) {
+  const { execSync } = require("child_process");
+  const SERVICE = "OpenDenteConnector";
+
+  let started = false;
+  let auto_start_set = false;
+  let final_state = null;
+  let error_category = null;
+
+  try {
+    execSync(`sc start ${SERVICE} 2>nul`, {
+      encoding: "utf8",
+      timeout: 15000,
+      shell: true,
+    });
+    started = true;
+  } catch (e) {
+    const msg = (
+      (e.stderr || "") +
+      (e.stdout || "") +
+      (e.message || "")
+    ).toLowerCase();
+    if (msg.includes("access is denied") || msg.includes("error 5")) {
+      error_category = "INSUFFICIENT_PRIVILEGES";
+    } else if (msg.includes("already running") || msg.includes("error 1056")) {
+      started = true;
+    } else if (msg.includes("does not exist") || msg.includes("error 1060")) {
+      error_category = "SERVICE_NOT_FOUND";
+    } else {
+      error_category = "START_FAILED";
+    }
+  }
+
+  if (started) {
+    try {
+      execSync(`sc config ${SERVICE} start= auto 2>nul`, {
+        encoding: "utf8",
+        timeout: 5000,
+        shell: true,
+      });
+      auto_start_set = true;
+    } catch {}
+  }
+
+  try {
+    const q = execSync(`sc query ${SERVICE} 2>nul`, {
+      encoding: "utf8",
+      timeout: 5000,
+      shell: true,
+    });
+    if (/RUNNING/i.test(q)) final_state = "RUNNING";
+    else if (/STOPPED/i.test(q)) final_state = "STOPPED";
+    else final_state = "UNKNOWN";
+  } catch {
+    final_state = "UNKNOWN";
+  }
+
+  const success = started || final_state === "RUNNING";
+  sendCommandResult(
+    commandId,
+    "START_OD_ECONNECTOR",
+    success ? "COMPLETED" : "FAILED",
+    {
+      service: SERVICE,
+      started,
+      auto_start_set,
+      final_state,
+      error_category,
+    },
+  );
 }
 
 // ── SCAN_OD_MYSQL_HOSTS ───────────────────────────────────────────────────────
