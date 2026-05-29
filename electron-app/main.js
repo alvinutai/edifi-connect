@@ -1734,7 +1734,10 @@ async function getOperatoryMap() {
 }
 
 // Maps raw OD REST API /insbenefits entries to EDiFi benefit format.
-// OD BenefitType 6 = CoInsurance (plan pays X%), 4 = Deductible, 1 = Frequency.
+// OD BenefitType enum (Open Dental source: EnumBenefitType):
+//   1 = CoInsurance (plan pays Percent% of procedure fee)
+//   2 = Deductible (MonetaryAmt = deductible amount)
+//   3 = Limitations (Quantity+period for frequency, or MonetaryAmt for annual max)
 // CovCatNum default mapping assumes standard OD category sequence.
 let odCovCatCache = null; // { catNum: 'PREVENTIVE', ... }
 
@@ -1793,11 +1796,11 @@ async function getOdCovCats() {
 }
 
 function mapOdApiBenefits(rawBenefits) {
+  // Corrected mapping — matches od-mysql.js and Open Dental EnumBenefitType source
   const BEN_TYPE = {
-    1: "Frequency",
-    3: "Copay",
-    4: "Deductible",
-    6: "CoInsurance",
+    1: "CoInsurance",  // Plan pays Percent% of fee
+    2: "Deductible",   // MonetaryAmt = deductible amount
+    3: "Limitations",  // Quantity+period (frequency) or MonetaryAmt (annual max / limitation)
   };
   const COV_LEVEL = { 0: "None", 1: "Individual", 2: "Family" };
   const TIME_PERIOD = {
@@ -1827,24 +1830,47 @@ function mapOdApiBenefits(rawBenefits) {
   };
 
   const results = [];
+  const dropped_reasons = {};
   for (const b of rawBenefits) {
     const type = BEN_TYPE[b.BenefitType];
-    if (!type) continue;
+    if (!type) {
+      const key = `type_${b.BenefitType}_unmapped`;
+      dropped_reasons[key] = (dropped_reasons[key] || 0) + 1;
+      continue;
+    }
     const category = catMap[b.CovCatNum] || "GENERAL";
     const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
     const entry = { type, category, coverage_level };
-    if (type === "CoInsurance") entry.percent = Number(b.Percent);
-    else if (type === "Deductible")
-      entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
-    else if (type === "Frequency") {
-      entry.quantity = b.Quantity;
-      entry.period = TIME_PERIOD[b.TimePeriod] || "None";
+    if (type === "CoInsurance") {
+      entry.percent = Number(b.Percent);
+    } else if (type === "Deductible") {
+      entry.amount_cents = b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
+    } else if (type === "Limitations") {
+      // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits)
+      if (b.Quantity != null) {
+        entry.quantity = b.Quantity;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "None";
+      }
+      if (b.MonetaryAmt != null && Number(b.MonetaryAmt) > 0) {
+        entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
+      }
     }
     results.push(entry);
   }
-  return results.filter((b) =>
-    b.type === "CoInsurance" ? b.percent > 0 : true,
-  );
+
+  const filtered = results.filter((b) => {
+    if (b.type === "CoInsurance") return b.percent > 0;
+    if (b.type === "Deductible") return b.amount_cents != null;
+    if (b.type === "Limitations") return b.quantity != null || b.amount_cents != null;
+    return true;
+  });
+
+  // Attach diagnostic metadata (not sent to backend as-is; caller uses it for stats)
+  filtered._raw_received = rawBenefits.length;
+  filtered._dropped = rawBenefits.length - filtered.length;
+  filtered._dropped_reasons = dropped_reasons;
+
+  return filtered;
 }
 
 async function syncODData(syncDate = null) {
@@ -1910,6 +1936,18 @@ async function syncODData(syncDate = null) {
     // 2. For each appointment, fetch patient + insurance (batch of 3)
     const enriched = [];
     let patientFetchNullCount = 0;
+    // Benefit diagnostic accumulators — aggregate across all appointments, no PHI
+    const benefitStats = {
+      raw_benefit_rows_received: 0,
+      mapped_benefit_rows: 0,
+      dropped_benefit_rows: 0,
+      dropped_reason_counts: {},
+      coinsurance_rows_mapped: 0,
+      deductible_rows_mapped: 0,
+      limitation_rows_mapped: 0,
+      annual_max_fields_found: 0,
+      deductible_fields_found: 0,
+    };
     const BATCH = 3;
     for (let i = 0; i < scheduled.length; i += BATCH) {
       const batch = scheduled.slice(i, i + BATCH);
@@ -1947,24 +1985,48 @@ async function syncODData(syncDate = null) {
             const primarySub = insSubs[0];
             const primaryPlan = insPlans[0];
 
+            // Extract plan-level financial fields — these exist on the insplan object
+            // regardless of whether insbenefits rows are stored.
+            const plan_annual_max_cents =
+              primaryPlan?.AnnualMax != null && Number(primaryPlan.AnnualMax) > 0
+                ? Math.round(Number(primaryPlan.AnnualMax) * 100) : null;
+            const plan_deductible_cents =
+              primaryPlan?.Deductible != null && Number(primaryPlan.Deductible) > 0
+                ? Math.round(Number(primaryPlan.Deductible) * 100) : null;
+            // BenefitNotes: boolean presence only — content never printed
+            const benefit_notes_present = !!(primarySub?.BenefitNotes?.trim());
+
+            // Track plan-level fields in stats (no PHI — just presence)
+            if (plan_annual_max_cents != null) benefitStats.annual_max_fields_found++;
+            if (plan_deductible_cents != null) benefitStats.deductible_fields_found++;
+
             // Source 1: OD REST API /insbenefits — reads the benefit table directly
             if (primaryPlan?.PlanNum) {
               try {
                 const rawBenefits = await odGet(
                   `/insbenefits?InsPlanNum=${primaryPlan.PlanNum}`,
                 );
-                if (Array.isArray(rawBenefits) && rawBenefits.length > 0) {
+                if (Array.isArray(rawBenefits)) {
                   benefits = mapOdApiBenefits(rawBenefits);
+                  // Accumulate diagnostic stats (metadata only, no PHI)
+                  benefitStats.raw_benefit_rows_received += rawBenefits.length;
+                  benefitStats.mapped_benefit_rows += benefits.length;
+                  benefitStats.dropped_benefit_rows += (benefits._dropped || 0);
+                  const droppedReasons = benefits._dropped_reasons || {};
+                  for (const [k, v] of Object.entries(droppedReasons)) {
+                    benefitStats.dropped_reason_counts[k] = (benefitStats.dropped_reason_counts[k] || 0) + v;
+                  }
+                  benefitStats.coinsurance_rows_mapped += benefits.filter(b => b.type === "CoInsurance").length;
+                  benefitStats.deductible_rows_mapped += benefits.filter(b => b.type === "Deductible").length;
+                  benefitStats.limitation_rows_mapped += benefits.filter(b => b.type === "Limitations").length;
                   if (benefits.length > 0) {
-                    log(
-                      `[OD Benefits] ${benefits.length} benefits from REST API for PatNum ${apt.PatNum} (Plan ${primaryPlan.PlanNum})`,
-                    );
+                    log(`[OD Benefits] ${benefits.length} benefits (raw: ${rawBenefits.length}) from REST API for Plan ${primaryPlan.PlanNum}`);
+                  } else if (rawBenefits.length > 0) {
+                    log(`[OD Benefits] ${rawBenefits.length} raw rows received but all filtered — check BenefitType values`);
                   }
                 }
               } catch (e) {
-                log(
-                  `[OD Benefits] REST API failed for PatNum ${apt.PatNum}: ${e.message}`,
-                );
+                log(`[OD Benefits] REST API failed for Plan ${primaryPlan.PlanNum}: ${e.message}`);
               }
             }
 
@@ -2018,6 +2080,9 @@ async function syncODData(syncDate = null) {
               patient,
               insurance: { patPlans, insSubs, insPlans, carriers },
               benefits,
+              plan_annual_max_cents,
+              plan_deductible_cents,
+              benefit_notes_present,
               operatory_name: operatoryMap[Number(apt.OperatoryNum)] ?? null,
               note: apt.Note ?? null,
               proc_codes: procCodes,
@@ -2033,10 +2098,11 @@ async function syncODData(syncDate = null) {
       enriched.push(...results.filter(Boolean));
     }
 
-    // Update diagnostic with patient fetch outcome
+    // Update diagnostic with patient fetch and benefit outcomes
     if (od_sync_status.last_diagnostic) {
       od_sync_status.last_diagnostic.patient_fetch_null_count = patientFetchNullCount;
       od_sync_status.last_diagnostic.enriched_count = enriched.length;
+      od_sync_status.last_diagnostic.benefit_stats = benefitStats;
     }
 
     if (enriched.length === 0) {
