@@ -109,6 +109,7 @@ const AGENT_CAPABILITIES = [
   "TEST_OD_REST_AUTH",
   "PROBE_OD_BENEFIT_SOURCES",
   "CLAIMPROCS_AUDIT",
+  "PULL_OD_CLAIMPROCS",
   "SET_OD_API_URL",
   "START_OD_ECONNECTOR",
   "SCAN_OD_MYSQL_HOSTS",
@@ -468,6 +469,9 @@ async function handleCommand(msg) {
         break;
       case "CLAIMPROCS_AUDIT":
         await handleClaimprocsAudit(command_id, payload);
+        break;
+      case "PULL_OD_CLAIMPROCS":
+        await handlePullOdClaimprocs(command_id, payload);
         break;
       case "SET_OD_API_URL":
         await handleSetOdApiUrl(command_id, payload);
@@ -952,6 +956,117 @@ async function handleSetOdApiUrl(commandId, payload) {
   saveConfig();
   sendCommandResult(commandId, "SET_OD_API_URL", "COMPLETED", {
     od_api_url_present: !!config.od_api_url,
+  });
+}
+
+// ── PULL_OD_CLAIMPROCS ───────────────────────────────────────────────────────
+// Reads /claimprocs per scheduled patient, aggregates benefit usage,
+// sends OD_CLAIMPROCS_PUSH to backend. Aggregate stats only — no PHI.
+
+function getADACategoryForCode(code) {
+  if (!code) return "GENERAL";
+  const c = String(code).trim().toUpperCase();
+  if (c.startsWith("D0")) return "DIAGNOSTIC";
+  if (c.startsWith("D1")) return "PREVENTIVE";
+  if (c.startsWith("D2")) return "BASIC";
+  if (c.startsWith("D3")) return "ENDODONTIC";
+  if (c.startsWith("D4")) return "PERIODONTIC";
+  if (c.startsWith("D5") || c.startsWith("D6")) return "MAJOR";
+  if (c.startsWith("D7")) return "ORAL_SURGERY";
+  if (c.startsWith("D8")) return "ORTHODONTIC";
+  return "GENERAL";
+}
+
+async function handlePullOdClaimprocs(commandId, payload) {
+  const syncDate = payload?.sync_date ?? new Date().toISOString().split("T")[0];
+
+  if (!config.od_api_url || !config.office_id) {
+    sendCommandResult(commandId, "PULL_OD_CLAIMPROCS", "FAILED", null, "NOT_CONFIGURED", "od_api_url or office_id not set");
+    return;
+  }
+
+  const allApts = (await odGet(`/appointments?date=${syncDate}`)) ?? [];
+  const scheduled = Array.isArray(allApts)
+    ? allApts.filter((a) => a.AptStatus === "Scheduled" || a.AptStatus === 1 || a.AptStatus === "1")
+    : [];
+
+  const currentYear = new Date().getFullYear().toString();
+  const patients = [];
+  let errors = 0;
+
+  for (const apt of scheduled) {
+    const patNum = apt.PatNum;
+    if (!patNum) continue;
+
+    try {
+      const cps = await odGet(`/claimprocs?PatNum=${patNum}`);
+      if (!Array.isArray(cps) || cps.length === 0) continue;
+
+      let paidCents = 0;
+      let dedCents = 0;
+      let totalCp = cps.length;
+      let currentYearCp = 0;
+      const catAccum = {};  // { category: { sum_pct, count } }
+
+      for (const cp of cps) {
+        const yr = String(cp.ProcDate ?? "").slice(0, 4);
+        if (yr === currentYear) {
+          currentYearCp++;
+          paidCents += Math.round((Number(cp.InsPayAmt) || 0) * 100);
+          dedCents += Math.round((Number(cp.DedApplied) || 0) * 100);
+
+          const code = cp.CodeSent || "";
+          const pct = Number(cp.Percentage) || 0;
+          if (code && pct > 0) {
+            const cat = getADACategoryForCode(code);
+            if (!catAccum[cat]) catAccum[cat] = { sum_pct: 0, count: 0 };
+            catAccum[cat].sum_pct += pct;
+            catAccum[cat].count++;
+          }
+        }
+      }
+
+      const coverage_rates_by_category = {};
+      for (const [cat, data] of Object.entries(catAccum)) {
+        coverage_rates_by_category[cat] = {
+          avg_pct: Math.round(data.sum_pct / data.count),
+          sample_count: data.count,
+        };
+      }
+
+      patients.push({
+        pat_num: patNum,
+        plan_num: apt.InsPlan1 || null,
+        paid_current_year_cents: paidCents,
+        deductible_applied_current_year_cents: dedCents,
+        total_claimprocs: totalCp,
+        current_year_claimprocs: currentYearCp,
+        coverage_rates_by_category,
+        has_claim_history: totalCp > 0,
+      });
+    } catch (e) {
+      errors++;
+      log(`[ClaimProcs] Error for PatNum ${patNum}: ${e.message.slice(0, 80)}`);
+    }
+  }
+
+  // Send benefit usage data to backend for calculation + storage
+  if (tunnel && tunnelOk && patients.length > 0) {
+    tunnel.send(JSON.stringify({
+      type: "OD_CLAIMPROCS_PUSH",
+      command_id: commandId,
+      date: syncDate,
+      patients,
+    }));
+    log(`[ClaimProcs] Sent ${patients.length} patients to backend`);
+  }
+
+  sendCommandResult(commandId, "PULL_OD_CLAIMPROCS", "COMPLETED", {
+    sync_date: syncDate,
+    patients_reviewed: scheduled.length,
+    patients_with_claimprocs: patients.length,
+    total_current_year_claimprocs: patients.reduce((s, p) => s + p.current_year_claimprocs, 0),
+    fetch_errors: errors,
   });
 }
 
