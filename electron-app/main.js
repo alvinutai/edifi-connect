@@ -107,6 +107,7 @@ const AGENT_CAPABILITIES = [
   "SET_MYSQL_CONFIG",
   "SET_OD_CUSTOMER_KEY",
   "TEST_OD_REST_AUTH",
+  "PROBE_OD_BENEFIT_SOURCES",
   "SET_OD_API_URL",
   "START_OD_ECONNECTOR",
   "SCAN_OD_MYSQL_HOSTS",
@@ -460,6 +461,9 @@ async function handleCommand(msg) {
         break;
       case "TEST_OD_REST_AUTH":
         await handleTestOdRestAuth(command_id);
+        break;
+      case "PROBE_OD_BENEFIT_SOURCES":
+        await handleProbeOdBenefitSources(command_id);
         break;
       case "SET_OD_API_URL":
         await handleSetOdApiUrl(command_id, payload);
@@ -944,6 +948,60 @@ async function handleSetOdApiUrl(commandId, payload) {
   saveConfig();
   sendCommandResult(commandId, "SET_OD_API_URL", "COMPLETED", {
     od_api_url_present: !!config.od_api_url,
+  });
+}
+
+// ── PROBE_OD_BENEFIT_SOURCES ─────────────────────────────────────────────────
+// Probes OD REST endpoints for eligibility history and claims data.
+// Returns HTTP status + availability only — no response content, no PHI.
+
+async function handleProbeOdBenefitSources(commandId) {
+  if (!config.od_api_url) {
+    sendCommandResult(commandId, "PROBE_OD_BENEFIT_SOURCES", "COMPLETED", {
+      error: "OD_API_URL_NOT_CONFIGURED",
+      endpoints: [],
+    });
+    return;
+  }
+
+  const trimmed = config.od_api_url.replace(/\/+$/, "");
+  const base = trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
+
+  // Endpoints that may contain benefit history data.
+  // Probed with Offset=0&Limit=1 to minimise response size.
+  // Content is NEVER returned — only HTTP status and availability.
+  const targets = [
+    { path: "/etranss?Offset=0&Limit=1",             label: "etranss" },
+    { path: "/etransmessagetexts?Offset=0&Limit=1",  label: "etransmessagetexts" },
+    { path: "/insverifies?Offset=0&Limit=1",          label: "insverifies" },
+    { path: "/claimprocs?Offset=0&Limit=1",           label: "claimprocs" },
+    { path: "/claims?Offset=0&Limit=1",               label: "claims" },
+  ];
+
+  const results = [];
+  const axios = require("axios");
+  for (const t of targets) {
+    let http_status = null;
+    let available = false;
+    let has_records = null;
+    try {
+      const r = await axios.get(`${base}${t.path}`, {
+        timeout: 8000,
+        headers: odAuthHeader(),
+      });
+      http_status = r.status;
+      available = true;
+      // Count only — content discarded, no PHI
+      has_records = Array.isArray(r.data) ? r.data.length > 0 : r.data != null;
+    } catch (e) {
+      http_status = e.response?.status ?? null;
+      available = false;
+    }
+    results.push({ endpoint: t.label, http_status, available, has_records });
+  }
+
+  sendCommandResult(commandId, "PROBE_OD_BENEFIT_SOURCES", "COMPLETED", {
+    endpoints: results,
   });
 }
 
