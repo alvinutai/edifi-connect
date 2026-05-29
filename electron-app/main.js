@@ -108,6 +108,7 @@ const AGENT_CAPABILITIES = [
   "SET_OD_CUSTOMER_KEY",
   "TEST_OD_REST_AUTH",
   "PROBE_OD_BENEFIT_SOURCES",
+  "CLAIMPROCS_AUDIT",
   "SET_OD_API_URL",
   "START_OD_ECONNECTOR",
   "SCAN_OD_MYSQL_HOSTS",
@@ -464,6 +465,9 @@ async function handleCommand(msg) {
         break;
       case "PROBE_OD_BENEFIT_SOURCES":
         await handleProbeOdBenefitSources(command_id);
+        break;
+      case "CLAIMPROCS_AUDIT":
+        await handleClaimprocsAudit(command_id, payload);
         break;
       case "SET_OD_API_URL":
         await handleSetOdApiUrl(command_id, payload);
@@ -951,6 +955,127 @@ async function handleSetOdApiUrl(commandId, payload) {
   });
 }
 
+// ── CLAIMPROCS_AUDIT ─────────────────────────────────────────────────────────
+// Audits claimprocs, claims, and insverifies for today's scheduled patients.
+// Aggregate counts and field names only — no PHI, no amounts, no codes printed.
+
+async function handleClaimprocsAudit(commandId, payload) {
+  const syncDate = payload?.sync_date ?? new Date().toISOString().split("T")[0];
+
+  if (!config.od_api_url) {
+    sendCommandResult(
+      commandId,
+      "CLAIMPROCS_AUDIT",
+      "FAILED",
+      null,
+      "OD_API_URL_NOT_CONFIGURED",
+      "od_api_url not set",
+    );
+    return;
+  }
+
+  const allApts = (await odGet(`/appointments?date=${syncDate}`)) ?? [];
+  const scheduled = Array.isArray(allApts)
+    ? allApts.filter(
+        (a) =>
+          a.AptStatus === "Scheduled" ||
+          a.AptStatus === 1 ||
+          a.AptStatus === "1",
+      )
+    : [];
+
+  const currentYear = new Date().getFullYear().toString();
+  const stats = {
+    sync_date: syncDate,
+    patients_reviewed: scheduled.length,
+    patients_with_claimprocs: 0,
+    total_claimprocs_found: 0,
+    claimprocs_current_plan_year_count: 0,
+    claimprocs_with_paid_amount_present: 0,
+    claimprocs_with_deductible_amount_present: 0,
+    claimprocs_with_proc_code_present: 0,
+    claimprocs_with_date_present: 0,
+    claimprocs_fields_found: [],
+    patients_with_claims: 0,
+    total_claims_found: 0,
+    claims_current_plan_year_count: 0,
+    insverifies_records_found: 0,
+    insverifies_note_field_present_count: 0,
+    insverifies_last_verified_date_present_count: 0,
+    insverifies_fields_found: [],
+    errors: [],
+  };
+
+  const cpFieldsSeen = new Set();
+
+  for (const apt of scheduled) {
+    const patNum = apt.PatNum;
+    if (!patNum) continue;
+
+    try {
+      const cps = await odGet(`/claimprocs?PatNum=${patNum}`);
+      if (Array.isArray(cps) && cps.length > 0) {
+        stats.patients_with_claimprocs++;
+        stats.total_claimprocs_found += cps.length;
+        for (const cp of cps) {
+          Object.keys(cp).forEach((k) => cpFieldsSeen.add(k));
+          const pd = String(cp.ProcDate ?? cp.DateEntry ?? "");
+          if (pd.startsWith(currentYear))
+            stats.claimprocs_current_plan_year_count++;
+          if (cp.InsPayAmt != null && Number(cp.InsPayAmt) !== 0)
+            stats.claimprocs_with_paid_amount_present++;
+          if (cp.DedApplied != null && Number(cp.DedApplied) !== 0)
+            stats.claimprocs_with_deductible_amount_present++;
+          if (cp.CodeSent || cp.ProcCode || cp.ADACode)
+            stats.claimprocs_with_proc_code_present++;
+          if (cp.ProcDate || cp.DateService)
+            stats.claimprocs_with_date_present++;
+        }
+      }
+    } catch (e) {
+      stats.errors.push(`claimprocs:${e.message.slice(0, 60)}`);
+    }
+
+    try {
+      const clms = await odGet(`/claims?PatNum=${patNum}`);
+      if (Array.isArray(clms) && clms.length > 0) {
+        stats.patients_with_claims++;
+        stats.total_claims_found += clms.length;
+        for (const c of clms) {
+          const ds = String(c.DateService ?? c.DateSent ?? "");
+          if (ds.startsWith(currentYear))
+            stats.claims_current_plan_year_count++;
+        }
+      }
+    } catch (e) {
+      stats.errors.push(`claims:${e.message.slice(0, 60)}`);
+    }
+  }
+
+  stats.claimprocs_fields_found = Array.from(cpFieldsSeen).sort();
+
+  // Insverifies sample — no patient filter, just check record structure
+  try {
+    const ivFieldsSeen = new Set();
+    const ivs = await odGet("/insverifies?Offset=0&Limit=50");
+    if (Array.isArray(ivs)) {
+      stats.insverifies_records_found = ivs.length;
+      for (const iv of ivs) {
+        Object.keys(iv).forEach((k) => ivFieldsSeen.add(k));
+        if (iv.Note != null && String(iv.Note).trim().length > 0)
+          stats.insverifies_note_field_present_count++;
+        if (iv.DateLastVerified || iv.DateLastAssigned)
+          stats.insverifies_last_verified_date_present_count++;
+      }
+      stats.insverifies_fields_found = Array.from(ivFieldsSeen).sort();
+    }
+  } catch (e) {
+    stats.errors.push(`insverifies:${e.message.slice(0, 60)}`);
+  }
+
+  sendCommandResult(commandId, "CLAIMPROCS_AUDIT", "COMPLETED", stats);
+}
+
 // ── PROBE_OD_BENEFIT_SOURCES ─────────────────────────────────────────────────
 // Probes OD REST endpoints for eligibility history and claims data.
 // Returns HTTP status + availability only — no response content, no PHI.
@@ -971,11 +1096,14 @@ async function handleProbeOdBenefitSources(commandId) {
   // Probed with Offset=0&Limit=1 to minimise response size.
   // Content is NEVER returned — only HTTP status and availability.
   const targets = [
-    { path: "/etranss?Offset=0&Limit=1",             label: "etranss" },
-    { path: "/etransmessagetexts?Offset=0&Limit=1",  label: "etransmessagetexts" },
-    { path: "/insverifies?Offset=0&Limit=1",          label: "insverifies" },
-    { path: "/claimprocs?Offset=0&Limit=1",           label: "claimprocs" },
-    { path: "/claims?Offset=0&Limit=1",               label: "claims" },
+    { path: "/etranss?Offset=0&Limit=1", label: "etranss" },
+    {
+      path: "/etransmessagetexts?Offset=0&Limit=1",
+      label: "etransmessagetexts",
+    },
+    { path: "/insverifies?Offset=0&Limit=1", label: "insverifies" },
+    { path: "/claimprocs?Offset=0&Limit=1", label: "claimprocs" },
+    { path: "/claims?Offset=0&Limit=1", label: "claims" },
   ];
 
   const results = [];
@@ -1856,9 +1984,9 @@ async function getOdCovCats() {
 function mapOdApiBenefits(rawBenefits) {
   // Corrected mapping — matches od-mysql.js and Open Dental EnumBenefitType source
   const BEN_TYPE = {
-    1: "CoInsurance",  // Plan pays Percent% of fee
-    2: "Deductible",   // MonetaryAmt = deductible amount
-    3: "Limitations",  // Quantity+period (frequency) or MonetaryAmt (annual max / limitation)
+    1: "CoInsurance", // Plan pays Percent% of fee
+    2: "Deductible", // MonetaryAmt = deductible amount
+    3: "Limitations", // Quantity+period (frequency) or MonetaryAmt (annual max / limitation)
   };
   const COV_LEVEL = { 0: "None", 1: "Individual", 2: "Family" };
   const TIME_PERIOD = {
@@ -1902,7 +2030,8 @@ function mapOdApiBenefits(rawBenefits) {
     if (type === "CoInsurance") {
       entry.percent = Number(b.Percent);
     } else if (type === "Deductible") {
-      entry.amount_cents = b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
+      entry.amount_cents =
+        b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
     } else if (type === "Limitations") {
       // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits)
       if (b.Quantity != null) {
@@ -1919,7 +2048,8 @@ function mapOdApiBenefits(rawBenefits) {
   const filtered = results.filter((b) => {
     if (b.type === "CoInsurance") return b.percent > 0;
     if (b.type === "Deductible") return b.amount_cents != null;
-    if (b.type === "Limitations") return b.quantity != null || b.amount_cents != null;
+    if (b.type === "Limitations")
+      return b.quantity != null || b.amount_cents != null;
     return true;
   });
 
@@ -2013,7 +2143,10 @@ async function syncODData(syncDate = null) {
         batch.map(async (apt) => {
           try {
             const patient = await odGet(`/patients/${apt.PatNum}`);
-            if (!patient) { patientFetchNullCount++; return null; }
+            if (!patient) {
+              patientFetchNullCount++;
+              return null;
+            }
 
             // Fetch insurance chain
             const patPlans =
@@ -2046,17 +2179,23 @@ async function syncODData(syncDate = null) {
             // Extract plan-level financial fields — these exist on the insplan object
             // regardless of whether insbenefits rows are stored.
             const plan_annual_max_cents =
-              primaryPlan?.AnnualMax != null && Number(primaryPlan.AnnualMax) > 0
-                ? Math.round(Number(primaryPlan.AnnualMax) * 100) : null;
+              primaryPlan?.AnnualMax != null &&
+              Number(primaryPlan.AnnualMax) > 0
+                ? Math.round(Number(primaryPlan.AnnualMax) * 100)
+                : null;
             const plan_deductible_cents =
-              primaryPlan?.Deductible != null && Number(primaryPlan.Deductible) > 0
-                ? Math.round(Number(primaryPlan.Deductible) * 100) : null;
+              primaryPlan?.Deductible != null &&
+              Number(primaryPlan.Deductible) > 0
+                ? Math.round(Number(primaryPlan.Deductible) * 100)
+                : null;
             // BenefitNotes: boolean presence only — content never printed
-            const benefit_notes_present = !!(primarySub?.BenefitNotes?.trim());
+            const benefit_notes_present = !!primarySub?.BenefitNotes?.trim();
 
             // Track plan-level fields in stats (no PHI — just presence)
-            if (plan_annual_max_cents != null) benefitStats.annual_max_fields_found++;
-            if (plan_deductible_cents != null) benefitStats.deductible_fields_found++;
+            if (plan_annual_max_cents != null)
+              benefitStats.annual_max_fields_found++;
+            if (plan_deductible_cents != null)
+              benefitStats.deductible_fields_found++;
 
             // Source 1: OD REST API /insbenefits — reads the benefit table directly
             if (primaryPlan?.PlanNum) {
@@ -2069,22 +2208,35 @@ async function syncODData(syncDate = null) {
                   // Accumulate diagnostic stats (metadata only, no PHI)
                   benefitStats.raw_benefit_rows_received += rawBenefits.length;
                   benefitStats.mapped_benefit_rows += benefits.length;
-                  benefitStats.dropped_benefit_rows += (benefits._dropped || 0);
+                  benefitStats.dropped_benefit_rows += benefits._dropped || 0;
                   const droppedReasons = benefits._dropped_reasons || {};
                   for (const [k, v] of Object.entries(droppedReasons)) {
-                    benefitStats.dropped_reason_counts[k] = (benefitStats.dropped_reason_counts[k] || 0) + v;
+                    benefitStats.dropped_reason_counts[k] =
+                      (benefitStats.dropped_reason_counts[k] || 0) + v;
                   }
-                  benefitStats.coinsurance_rows_mapped += benefits.filter(b => b.type === "CoInsurance").length;
-                  benefitStats.deductible_rows_mapped += benefits.filter(b => b.type === "Deductible").length;
-                  benefitStats.limitation_rows_mapped += benefits.filter(b => b.type === "Limitations").length;
+                  benefitStats.coinsurance_rows_mapped += benefits.filter(
+                    (b) => b.type === "CoInsurance",
+                  ).length;
+                  benefitStats.deductible_rows_mapped += benefits.filter(
+                    (b) => b.type === "Deductible",
+                  ).length;
+                  benefitStats.limitation_rows_mapped += benefits.filter(
+                    (b) => b.type === "Limitations",
+                  ).length;
                   if (benefits.length > 0) {
-                    log(`[OD Benefits] ${benefits.length} benefits (raw: ${rawBenefits.length}) from REST API for Plan ${primaryPlan.PlanNum}`);
+                    log(
+                      `[OD Benefits] ${benefits.length} benefits (raw: ${rawBenefits.length}) from REST API for Plan ${primaryPlan.PlanNum}`,
+                    );
                   } else if (rawBenefits.length > 0) {
-                    log(`[OD Benefits] ${rawBenefits.length} raw rows received but all filtered — check BenefitType values`);
+                    log(
+                      `[OD Benefits] ${rawBenefits.length} raw rows received but all filtered — check BenefitType values`,
+                    );
                   }
                 }
               } catch (e) {
-                log(`[OD Benefits] REST API failed for Plan ${primaryPlan.PlanNum}: ${e.message}`);
+                log(
+                  `[OD Benefits] REST API failed for Plan ${primaryPlan.PlanNum}: ${e.message}`,
+                );
               }
             }
 
@@ -2158,13 +2310,16 @@ async function syncODData(syncDate = null) {
 
     // Update diagnostic with patient fetch and benefit outcomes
     if (od_sync_status.last_diagnostic) {
-      od_sync_status.last_diagnostic.patient_fetch_null_count = patientFetchNullCount;
+      od_sync_status.last_diagnostic.patient_fetch_null_count =
+        patientFetchNullCount;
       od_sync_status.last_diagnostic.enriched_count = enriched.length;
       od_sync_status.last_diagnostic.benefit_stats = benefitStats;
     }
 
     if (enriched.length === 0) {
-      log(`[OD Sync] No appointments with complete patient data — ${patientFetchNullCount} patient fetches returned null`);
+      log(
+        `[OD Sync] No appointments with complete patient data — ${patientFetchNullCount} patient fetches returned null`,
+      );
       return;
     }
 
