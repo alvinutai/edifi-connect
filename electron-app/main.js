@@ -87,6 +87,7 @@ const od_sync_status = {
   last_error: null,
   last_counts: null,
   last_auth_error: null, // "AUTH_REJECTED_401" | "ECONNECTOR_NOT_RUNNING" | null
+  last_diagnostic: null, // { raw_appointments_returned, appointment_status_counts, filtered_scheduled_count, date_used, endpoint_used }
 };
 
 // ─── Hardcoded capability list ────────────────────────────────────────────────
@@ -731,6 +732,7 @@ async function handleSyncOdNow(commandId, payload) {
       sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
       completed_at: od_sync_status.last_success_at,
       last_auth_error: od_sync_status.last_auth_error ?? null,
+      diagnostic: od_sync_status.last_diagnostic ?? null,
     });
   } catch (e) {
     od_sync_status.last_error = e.message.slice(0, 200);
@@ -879,6 +881,7 @@ async function handleTestOdRestAuth(commandId) {
   let econnector_reachable = false;
   let auth_accepted = false;
   let error_category = null;
+  let response_records = null;
 
   try {
     const axios = require("axios");
@@ -886,7 +889,8 @@ async function handleTestOdRestAuth(commandId) {
       timeout: 8000,
       headers: odAuthHeader(),
     });
-    // r.data intentionally discarded — response body never returned
+    // Count records only — no content, no field values, no PHI
+    response_records = Array.isArray(r.data) ? r.data.length : r.data ? 1 : 0;
     http_status = r.status;
     econnector_reachable = true;
     auth_accepted = true;
@@ -915,6 +919,7 @@ async function handleTestOdRestAuth(commandId) {
     auth_accepted,
     http_status,
     error_category,
+    response_records,
   });
 }
 
@@ -1852,9 +1857,18 @@ async function syncODData(syncDate = null) {
   const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
+  const endpoint = `/appointments?date=${today}`;
   try {
     // 1. Get today's scheduled appointments
-    const allApts = (await odGet(`/appointments?date=${today}`)) ?? [];
+    const allApts = (await odGet(endpoint)) ?? [];
+
+    // Diagnostic: count by AptStatus — no PHI, counts only
+    const statusCounts = {};
+    for (const apt of allApts) {
+      const s = String(apt.AptStatus ?? "unknown");
+      statusCounts[s] = (statusCounts[s] || 0) + 1;
+    }
+
     const scheduled = Array.isArray(allApts)
       ? allApts.filter(
           (a) =>
@@ -1864,8 +1878,19 @@ async function syncODData(syncDate = null) {
         )
       : [];
 
+    // Always record diagnostic regardless of path taken
+    od_sync_status.last_diagnostic = {
+      raw_appointments_returned: allApts.length,
+      appointment_status_counts: statusCounts,
+      filtered_scheduled_count: scheduled.length,
+      date_used: today,
+      endpoint_used: endpoint,
+    };
+
     if (scheduled.length === 0) {
-      log("[OD Sync] No scheduled appointments today");
+      log(
+        `[OD Sync] No scheduled appointments — raw total: ${allApts.length}, statuses: ${JSON.stringify(statusCounts)}`,
+      );
       return;
     }
 
