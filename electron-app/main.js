@@ -922,10 +922,17 @@ async function handleTestOdRestAuth(commandId) {
 // Sets the Open Dental API URL in local config. No credentials stored.
 
 async function handleSetOdApiUrl(commandId, payload) {
-  const url = typeof payload?.od_api_url === "string" ? payload.od_api_url.trim() : "";
+  const url =
+    typeof payload?.od_api_url === "string" ? payload.od_api_url.trim() : "";
   if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) {
-    sendCommandResult(commandId, "SET_OD_API_URL", "FAILED", null, "INVALID_URL",
-      "od_api_url required and must start with http:// or https://");
+    sendCommandResult(
+      commandId,
+      "SET_OD_API_URL",
+      "FAILED",
+      null,
+      "INVALID_URL",
+      "od_api_url required and must start with http:// or https://",
+    );
     return;
   }
   config.od_api_url = url;
@@ -1849,7 +1856,12 @@ async function syncODData(syncDate = null) {
     // 1. Get today's scheduled appointments
     const allApts = (await odGet(`/appointments?date=${today}`)) ?? [];
     const scheduled = Array.isArray(allApts)
-      ? allApts.filter((a) => a.AptStatus === "Scheduled")
+      ? allApts.filter(
+          (a) =>
+            a.AptStatus === "Scheduled" ||
+            a.AptStatus === 1 ||
+            a.AptStatus === "1",
+        )
       : [];
 
     if (scheduled.length === 0) {
