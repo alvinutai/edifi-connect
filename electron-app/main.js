@@ -1885,6 +1885,9 @@ async function syncODData(syncDate = null) {
       filtered_scheduled_count: scheduled.length,
       date_used: today,
       endpoint_used: endpoint,
+      // PatNum is a DB integer — not PHI. Helps confirm field mapping.
+      first_apt_patnum: scheduled[0]?.PatNum ?? null,
+      first_apt_keys: scheduled[0] ? Object.keys(scheduled[0]).sort() : [],
     };
 
     if (scheduled.length === 0) {
@@ -1906,6 +1909,7 @@ async function syncODData(syncDate = null) {
 
     // 2. For each appointment, fetch patient + insurance (batch of 3)
     const enriched = [];
+    let patientFetchNullCount = 0;
     const BATCH = 3;
     for (let i = 0; i < scheduled.length; i += BATCH) {
       const batch = scheduled.slice(i, i + BATCH);
@@ -1913,7 +1917,7 @@ async function syncODData(syncDate = null) {
         batch.map(async (apt) => {
           try {
             const patient = await odGet(`/patients/${apt.PatNum}`);
-            if (!patient) return null;
+            if (!patient) { patientFetchNullCount++; return null; }
 
             // Fetch insurance chain
             const patPlans =
@@ -2029,8 +2033,14 @@ async function syncODData(syncDate = null) {
       enriched.push(...results.filter(Boolean));
     }
 
+    // Update diagnostic with patient fetch outcome
+    if (od_sync_status.last_diagnostic) {
+      od_sync_status.last_diagnostic.patient_fetch_null_count = patientFetchNullCount;
+      od_sync_status.last_diagnostic.enriched_count = enriched.length;
+    }
+
     if (enriched.length === 0) {
-      log("[OD Sync] No appointments with complete patient data");
+      log(`[OD Sync] No appointments with complete patient data — ${patientFetchNullCount} patient fetches returned null`);
       return;
     }
 
