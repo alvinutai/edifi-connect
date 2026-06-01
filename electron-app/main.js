@@ -118,6 +118,8 @@ const AGENT_CAPABILITIES = [
   "CLEAR_SESSION_COOKIES",
   "RESTART_APP",
   "QUIT_AND_INSTALL",
+  "REPORT_PORT_STATUS",
+  "REPORT_SERVICE_STATUS",
 ];
 
 function loadConfig() {
@@ -496,6 +498,12 @@ async function handleCommand(msg) {
         break;
       case "QUIT_AND_INSTALL":
         await handleQuitAndInstall(command_id);
+        break;
+      case "REPORT_PORT_STATUS":
+        await handleReportPortStatus(command_id);
+        break;
+      case "REPORT_SERVICE_STATUS":
+        await handleReportServiceStatus(command_id, payload);
         break;
       default:
         sendCommandResult(
@@ -981,13 +989,25 @@ async function handlePullOdClaimprocs(commandId, payload) {
   const syncDate = payload?.sync_date ?? new Date().toISOString().split("T")[0];
 
   if (!config.od_api_url || !config.office_id) {
-    sendCommandResult(commandId, "PULL_OD_CLAIMPROCS", "FAILED", null, "NOT_CONFIGURED", "od_api_url or office_id not set");
+    sendCommandResult(
+      commandId,
+      "PULL_OD_CLAIMPROCS",
+      "FAILED",
+      null,
+      "NOT_CONFIGURED",
+      "od_api_url or office_id not set",
+    );
     return;
   }
 
   const allApts = (await odGet(`/appointments?date=${syncDate}`)) ?? [];
   const scheduled = Array.isArray(allApts)
-    ? allApts.filter((a) => a.AptStatus === "Scheduled" || a.AptStatus === 1 || a.AptStatus === "1")
+    ? allApts.filter(
+        (a) =>
+          a.AptStatus === "Scheduled" ||
+          a.AptStatus === 1 ||
+          a.AptStatus === "1",
+      )
     : [];
 
   const currentYear = new Date().getFullYear().toString();
@@ -1006,7 +1026,7 @@ async function handlePullOdClaimprocs(commandId, payload) {
       let dedCents = 0;
       let totalCp = cps.length;
       let currentYearCp = 0;
-      const catAccum = {};  // { category: { sum_pct, count } }
+      const catAccum = {}; // { category: { sum_pct, count } }
 
       for (const cp of cps) {
         const yr = String(cp.ProcDate ?? "").slice(0, 4);
@@ -1052,12 +1072,14 @@ async function handlePullOdClaimprocs(commandId, payload) {
 
   // Send benefit usage data to backend for calculation + storage
   if (tunnel && tunnelOk && patients.length > 0) {
-    tunnel.send(JSON.stringify({
-      type: "OD_CLAIMPROCS_PUSH",
-      command_id: commandId,
-      date: syncDate,
-      patients,
-    }));
+    tunnel.send(
+      JSON.stringify({
+        type: "OD_CLAIMPROCS_PUSH",
+        command_id: commandId,
+        date: syncDate,
+        patients,
+      }),
+    );
     log(`[ClaimProcs] Sent ${patients.length} patients to backend`);
   }
 
@@ -1065,7 +1087,10 @@ async function handlePullOdClaimprocs(commandId, payload) {
     sync_date: syncDate,
     patients_reviewed: scheduled.length,
     patients_with_claimprocs: patients.length,
-    total_current_year_claimprocs: patients.reduce((s, p) => s + p.current_year_claimprocs, 0),
+    total_current_year_claimprocs: patients.reduce(
+      (s, p) => s + p.current_year_claimprocs,
+      0,
+    ),
     fetch_errors: errors,
   });
 }
@@ -1783,6 +1808,128 @@ async function handleQuitAndInstall(commandId) {
   setTimeout(() => {
     autoUpdater.quitAndInstall(false, true);
   }, 500);
+}
+
+// ── REPORT_PORT_STATUS ────────────────────────────────────────────────────────
+// Read-only netstat probe — checks whether port 30222 is listening.
+// No PHI, no credentials, no mutation.
+
+async function handleReportPortStatus(commandId) {
+  const { execSync } = require("child_process");
+  let listening = false;
+  let listener_pid = null;
+  let error = null;
+
+  try {
+    const out = execSync("netstat -ano", {
+      encoding: "utf8",
+      timeout: 8000,
+      shell: true,
+    });
+    for (const line of out.split("\n")) {
+      if (line.includes(":30222") && /LISTEN/i.test(line)) {
+        listening = true;
+        const m = line.trim().match(/(\d+)\s*$/);
+        if (m) listener_pid = parseInt(m[1], 10);
+        break;
+      }
+    }
+  } catch (e) {
+    error = e.message.slice(0, 200);
+  }
+
+  sendCommandResult(commandId, "REPORT_PORT_STATUS", "COMPLETED", {
+    port: 30222,
+    listening,
+    listener_pid,
+    error,
+  });
+}
+
+// ── REPORT_SERVICE_STATUS ─────────────────────────────────────────────────────
+// Read-only sc query/qc probe — returns service state and startup type.
+// Default service: OpenDenteConnector. Payload may override via service field.
+// No PHI, no credentials, no mutation.
+
+async function handleReportServiceStatus(commandId, payload) {
+  const { execSync } = require("child_process");
+
+  // Resolve service name — default to OpenDenteConnector if not provided
+  const rawService =
+    typeof payload?.service === "string" ? payload.service.trim() : "";
+  const SERVICE = rawService || "OpenDenteConnector";
+
+  // Allowlist validation — must pass before any execSync call.
+  // Rejects shell metacharacters that could enable injection via shell:true.
+  const SAFE_SERVICE_NAME = /^[A-Za-z0-9 _.\\-]{1,80}$/;
+  if (!SAFE_SERVICE_NAME.test(SERVICE)) {
+    sendCommandResult(
+      commandId,
+      "REPORT_SERVICE_STATUS",
+      "FAILED",
+      null,
+      "INVALID_SERVICE_NAME",
+      "Service name contains invalid characters. Allowed: letters, digits, spaces, underscores, dots, hyphens (max 80 chars).",
+    );
+    return;
+  }
+
+  let exists = false;
+  let state = null;
+  let start_type = null;
+  let error = null;
+
+  try {
+    const q = execSync(`sc query "${SERVICE}"`, {
+      encoding: "utf8",
+      timeout: 8000,
+      shell: true,
+    });
+    exists = true;
+    if (/RUNNING/i.test(q)) state = "RUNNING";
+    else if (/START_PENDING/i.test(q)) state = "START_PENDING";
+    else if (/STOP_PENDING/i.test(q)) state = "STOP_PENDING";
+    else if (/STOPPED/i.test(q)) state = "STOPPED";
+    else state = "UNKNOWN";
+  } catch (e) {
+    const msg = (
+      (e.stderr || "") +
+      (e.stdout || "") +
+      (e.message || "")
+    ).toLowerCase();
+    if (
+      msg.includes("does not exist") ||
+      msg.includes("error 1060") ||
+      msg.includes("openscmanager")
+    ) {
+      exists = false;
+      state = "NOT_FOUND";
+    } else {
+      exists = false;
+      state = "QUERY_FAILED";
+      error = e.message.slice(0, 200);
+    }
+  }
+
+  if (exists) {
+    try {
+      const cfg = execSync(`sc qc "${SERVICE}"`, {
+        encoding: "utf8",
+        timeout: 8000,
+        shell: true,
+      });
+      const m = cfg.match(/START_TYPE\s*:\s*\d+\s+(\S+)/i);
+      if (m) start_type = m[1];
+    } catch {}
+  }
+
+  sendCommandResult(commandId, "REPORT_SERVICE_STATUS", "COMPLETED", {
+    service: SERVICE,
+    exists,
+    state,
+    start_type,
+    error,
+  });
 }
 
 // ─── Tunnel to EDiFi Cloud ────────────────────────────────────────────────────
