@@ -356,7 +356,6 @@ function openPortalWindow(portal) {
       currentUrl === portal.url ||
       currentUrl.includes("login") ||
       currentUrl.includes("signin") ||
-      currentUrl.includes("auth") ||
       currentUrl === "" ||
       currentUrl === "about:blank";
     if (onLoginPage) return;
