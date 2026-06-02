@@ -2379,13 +2379,24 @@ async function getOdCovCats() {
 }
 
 function mapOdApiBenefits(rawBenefits) {
-  // Corrected mapping — matches od-mysql.js and Open Dental EnumBenefitType source
+  // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
-    1: "CoInsurance", // Plan pays Percent% of fee
-    2: "Deductible", // MonetaryAmt = deductible amount
-    3: "Limitations", // Quantity+period (frequency) or MonetaryAmt (annual max / limitation)
+    1: "CoInsurance",
+    2: "Deductible",
+    3: "Limitations",
+    CoInsurance: "CoInsurance",
+    Deductible: "Deductible",
+    Limitations: "Limitations",
+    ActiveCoverage: "CoInsurance", // treat active coverage as CoInsurance category
   };
-  const COV_LEVEL = { 0: "None", 1: "Individual", 2: "Family" };
+  const COV_LEVEL = {
+    0: "None",
+    1: "Individual",
+    2: "Family",
+    None: "None",
+    Individual: "Individual",
+    Family: "Family",
+  };
   const TIME_PERIOD = {
     0: "None",
     1: "ServiceYear",
@@ -2395,6 +2406,12 @@ function mapOdApiBenefits(rawBenefits) {
     5: "Years3",
     8: "Months6",
     12: "Months24",
+    None: "None",
+    ServiceYear: "ServiceYear",
+    CalendarYear: "CalendarYear",
+    Lifetime: "Lifetime",
+    Years: "Years2",
+    NumberInLast12Months: "Months12",
   };
   // Use cached covcat if available, else default numeric mapping
   const catMap = odCovCatCache || {
