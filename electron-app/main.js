@@ -184,9 +184,9 @@ const PORTALS = [
   {
     payerCode: "DDIC",
     payerName: "Delta Dental",
-    url: "https://www.deltadentalins.com/dental-professionals/",
+    url: "https://professional.deltadentalins.com/",
     partition: "persist:ddic",
-    cookieUrl: "https://www.deltadentalins.com",
+    cookieUrl: "https://professional.deltadentalins.com",
     domain: "deltadentalins.com",
   },
   {
@@ -3246,8 +3246,7 @@ async function performEligibilityScrape(page, payerCode, patientInfo) {
       benefits = parseBenefitRows(html_snapshot);
     } else if (payerCode === "DDIC") {
       // Navigate directly to provider portal — session cookies make this land logged-in
-      // www1.deltadentalins.com/ciam/login has DNS issues; go straight to the dashboard
-      await page.goto("https://www.deltadentalins.com/dental-professionals/", {
+      await page.goto("https://professional.deltadentalins.com/", {
         waitUntil: "networkidle",
         timeout: 30000,
       });
