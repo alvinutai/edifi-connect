@@ -205,6 +205,62 @@ const PORTALS = [
     cookieUrl: "https://www.emihealth.com",
     domain: "emihealth.com",
   },
+  {
+    payerCode: "GUARDIAN",
+    payerName: "Guardian Dental",
+    url: "https://www.guardiananytime.com/gafd/wps/portal/providers/home",
+    partition: "persist:guardian",
+    cookieUrl: "https://www.guardiananytime.com",
+    domain: "guardiananytime.com",
+  },
+  {
+    payerCode: "METLIFE",
+    payerName: "MetLife Dental",
+    url: "https://www.metdental.com",
+    partition: "persist:metlife",
+    cookieUrl: "https://www.metdental.com",
+    domain: "metdental.com",
+  },
+  {
+    payerCode: "AETNA",
+    payerName: "Aetna Dental",
+    url: "https://www.aetna.com/health-care-professionals/dental-claims-and-benefits.html",
+    partition: "persist:aetna",
+    cookieUrl: "https://www.aetna.com",
+    domain: "aetna.com",
+  },
+  {
+    payerCode: "UNITEDCONCORDIA",
+    payerName: "United Concordia",
+    url: "https://www.unitedconcordia.com/dental-insurance/providers/",
+    partition: "persist:unitedconcordia",
+    cookieUrl: "https://www.unitedconcordia.com",
+    domain: "unitedconcordia.com",
+  },
+  {
+    payerCode: "DENTALSELECT",
+    payerName: "Dental Select",
+    url: "https://www.dentalselect.com/providers",
+    partition: "persist:dentalselect",
+    cookieUrl: "https://www.dentalselect.com",
+    domain: "dentalselect.com",
+  },
+  {
+    payerCode: "FEPBLUE",
+    payerName: "FEP BlueDental",
+    url: "https://www.fepblue.org/dental-providers",
+    partition: "persist:fepblue",
+    cookieUrl: "https://www.fepblue.org",
+    domain: "fepblue.org",
+  },
+  {
+    payerCode: "MUTUALMAHA",
+    payerName: "Mutual of Omaha",
+    url: "https://www.mutualofomaha.com/provider",
+    partition: "persist:mutualmaha",
+    cookieUrl: "https://www.mutualofomaha.com",
+    domain: "mutualofomaha.com",
+  },
 ];
 
 async function checkPartitionCookies(portal) {
@@ -2751,7 +2807,7 @@ async function syncODData(syncDate = null) {
       od_sync_status.last_diagnostic.benefit_stats = benefitStats;
       // Capture carrier names so failed payer resolutions can be diagnosed remotely
       od_sync_status.last_diagnostic.carrier_names_in_sync = enriched
-        .map(a => a.insurance?.carriers?.[0]?.CarrierName ?? null)
+        .map((a) => a.insurance?.carriers?.[0]?.CarrierName ?? null)
         .filter(Boolean);
     }
 
