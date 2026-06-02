@@ -1018,7 +1018,10 @@ async function handlePullOdClaimprocs(commandId, payload) {
       )
     : [];
 
-  const currentYear = new Date().getFullYear().toString();
+  // Use last 30 days for rate calculation — most recent and accurate
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - 30);
+  const cutoffStr = cutoffDate.toISOString().slice(0, 10);
   const patients = [];
   let errors = 0;
 
@@ -1037,8 +1040,8 @@ async function handlePullOdClaimprocs(commandId, payload) {
       const catAccum = {}; // { category: { sum_pct, count } }
 
       for (const cp of cps) {
-        const yr = String(cp.ProcDate ?? "").slice(0, 4);
-        if (yr === currentYear) {
+        const procDate = String(cp.ProcDate ?? "").slice(0, 10);
+        if (procDate >= cutoffStr) {
           currentYearCp++;
           paidCents += Math.round((Number(cp.InsPayAmt) || 0) * 100);
           dedCents += Math.round((Number(cp.DedApplied) || 0) * 100);
