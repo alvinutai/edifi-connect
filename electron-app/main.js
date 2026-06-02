@@ -2735,6 +2735,10 @@ async function syncODData(syncDate = null) {
         patientFetchNullCount;
       od_sync_status.last_diagnostic.enriched_count = enriched.length;
       od_sync_status.last_diagnostic.benefit_stats = benefitStats;
+      // Capture carrier names so failed payer resolutions can be diagnosed remotely
+      od_sync_status.last_diagnostic.carrier_names_in_sync = enriched
+        .map(a => a.insurance?.carriers?.[0]?.CarrierName ?? null)
+        .filter(Boolean);
     }
 
     if (enriched.length === 0) {
