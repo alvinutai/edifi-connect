@@ -341,6 +341,11 @@ function openPortalWindow(portal) {
     },
   });
 
+  // Spoof user-agent to standard Chrome so portal sites don't block Electron
+  win.webContents.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  );
+
   portalWindows[portal.payerCode] = win;
   win.loadURL(portal.url);
 
