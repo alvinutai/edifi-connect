@@ -1255,8 +1255,8 @@ async function handleProbeOdBenefitSources(commandId) {
     { path: "/insverifies?Offset=0&Limit=1", label: "insverifies" },
     { path: "/claimprocs?Offset=0&Limit=1", label: "claimprocs" },
     { path: "/claims?Offset=0&Limit=1", label: "claims" },
+    { path: "/benefits?PlanNum=1", label: "benefits" },
     { path: "/insbenefits?Offset=0&Limit=1", label: "insbenefits" },
-    { path: "/benefit?Offset=0&Limit=1", label: "benefit" },
   ];
 
   const results = [];
@@ -2594,17 +2594,16 @@ async function syncODData(syncDate = null) {
             if (plan_deductible_cents != null)
               benefitStats.deductible_fields_found++;
 
-            // Source 1: OD REST API /insbenefits or /benefit — reads the benefit table directly.
-            // OD versions differ: newer use /insbenefits, older use /benefit.
+            // Source 1: OD REST API /benefits — correct OD endpoint (plural, added v22.3.27)
             if (primaryPlan?.PlanNum) {
               try {
                 let rawBenefits = await odGet(
-                  `/insbenefits?PlanNum=${primaryPlan.PlanNum}`,
+                  `/benefits?PlanNum=${primaryPlan.PlanNum}`,
                 );
-                // Fallback: some OD versions expose the benefit table as /benefit
+                // Fallback: older endpoint names tried if /benefits returns empty
                 if (!Array.isArray(rawBenefits) || rawBenefits.length === 0) {
                   const alt = await odGet(
-                    `/benefit?PlanNum=${primaryPlan.PlanNum}`,
+                    `/insbenefits?PlanNum=${primaryPlan.PlanNum}`,
                   );
                   if (Array.isArray(alt) && alt.length > 0) rawBenefits = alt;
                 }
