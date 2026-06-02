@@ -184,7 +184,7 @@ const PORTALS = [
   {
     payerCode: "DDIC",
     payerName: "Delta Dental",
-    url: "https://www.deltadentalins.com/dental-professionals/login.html",
+    url: "https://online.deltadentalins.com/provAuth/login",
     partition: "persist:ddic",
     cookieUrl: "https://www.deltadentalins.com",
     domain: "deltadentalins.com",
