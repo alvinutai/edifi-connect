@@ -2004,15 +2004,30 @@ async function handleGetEConnectorLog(commandId) {
 
 async function handleWriteHostsEntry(commandId, payload) {
   const ip = typeof payload?.ip === "string" ? payload.ip.trim() : "";
-  const hostname = typeof payload?.hostname === "string" ? payload.hostname.trim() : "";
+  const hostname =
+    typeof payload?.hostname === "string" ? payload.hostname.trim() : "";
 
   // Validate IP and hostname — allowlist only safe characters
   if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
-    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null, "INVALID_IP", "ip must be a valid IPv4 address");
+    sendCommandResult(
+      commandId,
+      "WRITE_HOSTS_ENTRY",
+      "FAILED",
+      null,
+      "INVALID_IP",
+      "ip must be a valid IPv4 address",
+    );
     return;
   }
   if (!hostname || !/^[a-zA-Z0-9.\-]{1,100}$/.test(hostname)) {
-    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null, "INVALID_HOSTNAME", "hostname contains invalid characters");
+    sendCommandResult(
+      commandId,
+      "WRITE_HOSTS_ENTRY",
+      "FAILED",
+      null,
+      "INVALID_HOSTNAME",
+      "hostname contains invalid characters",
+    );
     return;
   }
 
@@ -2036,9 +2051,14 @@ async function handleWriteHostsEntry(commandId, payload) {
       hostname,
     });
   } catch (e) {
-    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null,
+    sendCommandResult(
+      commandId,
+      "WRITE_HOSTS_ENTRY",
+      "FAILED",
+      null,
       e.code === "EACCES" ? "PERMISSION_DENIED" : "WRITE_ERROR",
-      e.message.slice(0, 200));
+      e.message.slice(0, 200),
+    );
   }
 }
 
@@ -2573,7 +2593,7 @@ async function syncODData(syncDate = null) {
             if (primaryPlan?.PlanNum) {
               try {
                 const rawBenefits = await odGet(
-                  `/insbenefits?InsPlanNum=${primaryPlan.PlanNum}`,
+                  `/insbenefits?PlanNum=${primaryPlan.PlanNum}`,
                 );
                 if (Array.isArray(rawBenefits)) {
                   benefits = mapOdApiBenefits(rawBenefits);
