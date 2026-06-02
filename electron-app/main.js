@@ -1252,6 +1252,8 @@ async function handleProbeOdBenefitSources(commandId) {
     { path: "/insverifies?Offset=0&Limit=1", label: "insverifies" },
     { path: "/claimprocs?Offset=0&Limit=1", label: "claimprocs" },
     { path: "/claims?Offset=0&Limit=1", label: "claims" },
+    { path: "/insbenefits?Offset=0&Limit=1", label: "insbenefits" },
+    { path: "/benefit?Offset=0&Limit=1", label: "benefit" },
   ];
 
   const results = [];
