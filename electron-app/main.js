@@ -120,6 +120,7 @@ const AGENT_CAPABILITIES = [
   "QUIT_AND_INSTALL",
   "REPORT_PORT_STATUS",
   "REPORT_SERVICE_STATUS",
+  "GET_ECONNECTOR_LOG",
 ];
 
 function loadConfig() {
@@ -504,6 +505,9 @@ async function handleCommand(msg) {
         break;
       case "REPORT_SERVICE_STATUS":
         await handleReportServiceStatus(command_id, payload);
+        break;
+      case "GET_ECONNECTOR_LOG":
+        await handleGetEConnectorLog(command_id);
         break;
       default:
         sendCommandResult(
@@ -1418,7 +1422,8 @@ async function handleScanOdMysqlHosts(commandId) {
       result.od_config_port = get(["DatabasePort", "Port"]) || "3306";
       result.od_config_database = get(["Database", "DbName"]);
       result.od_config_user = get(["DatabaseUser", "DbUser", "User"]);
-      const plaintext = get(["DatabasePassword", "DbPassword", "Password"]) || "";
+      const plaintext =
+        get(["DatabasePassword", "DbPassword", "Password"]) || "";
       const hash = get(["MySqlPassHash", "DatabasePasswordHash"]) || "";
       result.od_config_has_plaintext_password = !!plaintext;
       result.od_config_has_hashed_password = !!hash;
@@ -1928,6 +1933,62 @@ async function handleReportServiceStatus(commandId, payload) {
     exists,
     state,
     start_type,
+    error,
+  });
+}
+
+// ── GET_ECONNECTOR_LOG ────────────────────────────────────────────────────────
+// Reads Windows Event Log for OpenDenteConnector crash/error entries.
+// Read-only. No PHI. Returns event summary to diagnose eConnector startup failures.
+
+async function handleGetEConnectorLog(commandId) {
+  const { execSync } = require("child_process");
+  let events = [];
+  let error = null;
+
+  try {
+    // PowerShell: read System + Application logs for eConnector/OD service events
+    const ps =
+      `powershell -NoProfile -Command "` +
+      `Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{LogName='System';Level=1,2,3} | ` +
+      `Where-Object { $_.Message -match 'OpenDenteConnector|OpenDental|eConnector' } | ` +
+      `Select-Object -First 20 TimeCreated,Id,LevelDisplayName,Message | ` +
+      `ForEach-Object { $_.TimeCreated.ToString('u') + '|' + $_.Id + '|' + $_.LevelDisplayName + '|' + $_.Message.Substring(0,[Math]::Min(300,$_.Message.Length)) } | ` +
+      `Out-String"`;
+    const out = execSync(ps, { encoding: "utf8", timeout: 20000, shell: true });
+    const lines = out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 10);
+    events = lines.slice(0, 20);
+  } catch (e) {
+    error = e.message.slice(0, 200);
+  }
+
+  // Also try Application log
+  try {
+    const ps2 =
+      `powershell -NoProfile -Command "` +
+      `Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{LogName='Application';Level=1,2,3} | ` +
+      `Where-Object { $_.ProviderName -match 'OpenDental|eConnector' -or $_.Message -match 'OpenDenteConnector' } | ` +
+      `Select-Object -First 10 TimeCreated,Id,ProviderName,LevelDisplayName,Message | ` +
+      `ForEach-Object { $_.TimeCreated.ToString('u') + '|' + $_.Id + '|' + $_.ProviderName + '|' + $_.LevelDisplayName + '|' + $_.Message.Substring(0,[Math]::Min(300,$_.Message.Length)) } | ` +
+      `Out-String"`;
+    const out2 = execSync(ps2, {
+      encoding: "utf8",
+      timeout: 20000,
+      shell: true,
+    });
+    const lines2 = out2
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 10);
+    events = events.concat(lines2.slice(0, 10));
+  } catch {}
+
+  sendCommandResult(commandId, "GET_ECONNECTOR_LOG", "COMPLETED", {
+    event_count: events.length,
+    events,
     error,
   });
 }
