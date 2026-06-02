@@ -345,6 +345,16 @@ function openPortalWindow(portal) {
   win.loadURL(portal.url);
 
   const checkAndCapture = async () => {
+    // Don't capture on the initial login page load — only after successful auth navigation
+    const currentUrl = win.webContents.getURL();
+    const onLoginPage =
+      currentUrl === portal.url ||
+      currentUrl.includes("login") ||
+      currentUrl.includes("signin") ||
+      currentUrl.includes("auth") ||
+      currentUrl === "" ||
+      currentUrl === "about:blank";
+    if (onLoginPage) return;
     const cookies = await checkPartitionCookies(portal);
     if (!cookies) return;
     log(
