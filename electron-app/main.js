@@ -2572,7 +2572,10 @@ async function syncODData(syncDate = null) {
           (a) =>
             a.AptStatus === "Scheduled" ||
             a.AptStatus === 1 ||
-            a.AptStatus === "1",
+            a.AptStatus === "1" ||
+            a.AptStatus === "Complete" ||
+            a.AptStatus === 2 ||
+            a.AptStatus === "2",
         )
       : [];
 
