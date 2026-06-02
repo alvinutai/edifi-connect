@@ -121,6 +121,7 @@ const AGENT_CAPABILITIES = [
   "REPORT_PORT_STATUS",
   "REPORT_SERVICE_STATUS",
   "GET_ECONNECTOR_LOG",
+  "WRITE_HOSTS_ENTRY",
 ];
 
 function loadConfig() {
@@ -508,6 +509,9 @@ async function handleCommand(msg) {
         break;
       case "GET_ECONNECTOR_LOG":
         await handleGetEConnectorLog(command_id);
+        break;
+      case "WRITE_HOSTS_ENTRY":
+        await handleWriteHostsEntry(command_id, payload);
         break;
       default:
         sendCommandResult(
@@ -1991,6 +1995,51 @@ async function handleGetEConnectorLog(commandId) {
     events,
     error,
   });
+}
+
+// ── WRITE_HOSTS_ENTRY ─────────────────────────────────────────────────────────
+// Writes a single hostname→IP entry to Windows hosts file if not already present.
+// Used to fix DNS failures for OD license server (opendentalsoft.com).
+// Idempotent. No PHI. Requires payload: { ip, hostname }.
+
+async function handleWriteHostsEntry(commandId, payload) {
+  const ip = typeof payload?.ip === "string" ? payload.ip.trim() : "";
+  const hostname = typeof payload?.hostname === "string" ? payload.hostname.trim() : "";
+
+  // Validate IP and hostname — allowlist only safe characters
+  if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null, "INVALID_IP", "ip must be a valid IPv4 address");
+    return;
+  }
+  if (!hostname || !/^[a-zA-Z0-9.\-]{1,100}$/.test(hostname)) {
+    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null, "INVALID_HOSTNAME", "hostname contains invalid characters");
+    return;
+  }
+
+  const HOSTS_PATH = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+  const entry = `${ip} ${hostname}`;
+
+  try {
+    const existing = fs.readFileSync(HOSTS_PATH, "utf8");
+    if (existing.includes(hostname)) {
+      sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "COMPLETED", {
+        written: false,
+        reason: "entry_already_present",
+        hostname,
+      });
+      return;
+    }
+    fs.appendFileSync(HOSTS_PATH, `\n${entry}\n`);
+    log(`[Hosts] Added: ${entry}`);
+    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "COMPLETED", {
+      written: true,
+      hostname,
+    });
+  } catch (e) {
+    sendCommandResult(commandId, "WRITE_HOSTS_ENTRY", "FAILED", null,
+      e.code === "EACCES" ? "PERMISSION_DENIED" : "WRITE_ERROR",
+      e.message.slice(0, 200));
+  }
 }
 
 // ─── Tunnel to EDiFi Cloud ────────────────────────────────────────────────────
