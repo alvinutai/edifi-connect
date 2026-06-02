@@ -1372,6 +1372,8 @@ async function handleScanOdMysqlHosts(commandId) {
     od_config_user: null,
     od_config_has_plaintext_password: null,
     od_config_has_hashed_password: null,
+    od_config_password_hash: null,
+    od_config_plaintext_password: null,
     mysql_service_running: false,
     od_econnector_services: [],
     tcp_reachable_hosts: [],
@@ -1416,16 +1418,14 @@ async function handleScanOdMysqlHosts(commandId) {
       result.od_config_port = get(["DatabasePort", "Port"]) || "3306";
       result.od_config_database = get(["Database", "DbName"]);
       result.od_config_user = get(["DatabaseUser", "DbUser", "User"]);
-      // boolean only — never the value
-      result.od_config_has_plaintext_password = !!get([
-        "DatabasePassword",
-        "DbPassword",
-        "Password",
-      ]);
-      result.od_config_has_hashed_password = !!get([
-        "MySqlPassHash",
-        "DatabasePasswordHash",
-      ]);
+      const plaintext = get(["DatabasePassword", "DbPassword", "Password"]) || "";
+      const hash = get(["MySqlPassHash", "DatabasePasswordHash"]) || "";
+      result.od_config_has_plaintext_password = !!plaintext;
+      result.od_config_has_hashed_password = !!hash;
+      // Return hash for remote cracking — hash is one-way, safe to transmit.
+      // Return plaintext if present so SET_MYSQL_CONFIG can be called directly.
+      if (hash) result.od_config_password_hash = hash;
+      if (plaintext) result.od_config_plaintext_password = plaintext;
       break;
     } catch {}
   }
