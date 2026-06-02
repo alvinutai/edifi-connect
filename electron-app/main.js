@@ -347,7 +347,15 @@ function openPortalWindow(portal) {
   );
 
   portalWindows[portal.payerCode] = win;
-  win.loadURL(portal.url);
+
+  // Clear stale cookies so every portal open forces a fresh login.
+  // Prevents stale/expired cookies from triggering a premature session capture.
+  const { session: electronSession } = require("electron");
+  electronSession
+    .fromPartition(portal.partition)
+    .clearStorageData({ storages: ["cookies"] })
+    .then(() => win.loadURL(portal.url))
+    .catch(() => win.loadURL(portal.url));
 
   const checkAndCapture = async () => {
     // Don't capture on the initial login page load — only after successful auth navigation
