@@ -3835,6 +3835,13 @@ function updateTray() {
       click: () =>
         shell.openExternal("https://edifi-eligibility-platform.netlify.app"),
     },
+    {
+      label: "Connect Insurance Portal",
+      submenu: PORTALS.map((p) => ({
+        label: p.payerName,
+        click: () => openPortalWindow(p),
+      })),
+    },
     { label: "Install Chrome Extension", click: showExtensionInstructions },
     {
       label: lastOdSync
