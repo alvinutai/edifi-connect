@@ -2611,12 +2611,26 @@ async function syncODData(syncDate = null) {
             if (plan_deductible_cents != null)
               benefitStats.deductible_fields_found++;
 
-            // Source 1: OD REST API /benefits — correct OD endpoint (plural, added v22.3.27)
+            // Source 1: OD REST API /benefits — query BOTH plan-level AND patient-level entries
+            // OD stores coinsurance % at plan level (PlanNum) OR patient-override level (PatPlanNum)
             if (primaryPlan?.PlanNum) {
               try {
                 let rawBenefits = await odGet(
                   `/benefits?PlanNum=${primaryPlan.PlanNum}`,
                 );
+                // Also fetch patient-specific benefits (PatPlanNum) — these often contain
+                // the actual coinsurance % entered per-patient in OD
+                const primaryPatPlanNum = patPlans[0]?.PatPlanNum;
+                if (primaryPatPlanNum) {
+                  const patBenefits = await odGet(
+                    `/benefits?PatPlanNum=${primaryPatPlanNum}`,
+                  );
+                  if (Array.isArray(patBenefits) && patBenefits.length > 0) {
+                    rawBenefits = Array.isArray(rawBenefits)
+                      ? [...rawBenefits, ...patBenefits]
+                      : patBenefits;
+                  }
+                }
                 // Fallback: older endpoint names tried if /benefits returns empty
                 if (!Array.isArray(rawBenefits) || rawBenefits.length === 0) {
                   const alt = await odGet(
