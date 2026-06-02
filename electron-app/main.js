@@ -2589,12 +2589,20 @@ async function syncODData(syncDate = null) {
             if (plan_deductible_cents != null)
               benefitStats.deductible_fields_found++;
 
-            // Source 1: OD REST API /insbenefits — reads the benefit table directly
+            // Source 1: OD REST API /insbenefits or /benefit — reads the benefit table directly.
+            // OD versions differ: newer use /insbenefits, older use /benefit.
             if (primaryPlan?.PlanNum) {
               try {
-                const rawBenefits = await odGet(
+                let rawBenefits = await odGet(
                   `/insbenefits?PlanNum=${primaryPlan.PlanNum}`,
                 );
+                // Fallback: some OD versions expose the benefit table as /benefit
+                if (!Array.isArray(rawBenefits) || rawBenefits.length === 0) {
+                  const alt = await odGet(
+                    `/benefit?PlanNum=${primaryPlan.PlanNum}`,
+                  );
+                  if (Array.isArray(alt) && alt.length > 0) rawBenefits = alt;
+                }
                 if (Array.isArray(rawBenefits)) {
                   benefits = mapOdApiBenefits(rawBenefits);
                   // Accumulate diagnostic stats (metadata only, no PHI)
