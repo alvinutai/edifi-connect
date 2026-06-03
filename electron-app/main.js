@@ -122,6 +122,7 @@ const AGENT_CAPABILITIES = [
   "REPORT_SERVICE_STATUS",
   "GET_ECONNECTOR_LOG",
   "WRITE_HOSTS_ENTRY",
+  "SYNC_FEE_SCHEDULE",
 ];
 
 function loadConfig() {
@@ -582,6 +583,9 @@ async function handleCommand(msg) {
         break;
       case "WRITE_HOSTS_ENTRY":
         await handleWriteHostsEntry(command_id, payload);
+        break;
+      case "SYNC_FEE_SCHEDULE":
+        await handleSyncFeeSchedule(command_id, payload);
         break;
       default:
         sendCommandResult(
@@ -2137,6 +2141,113 @@ async function handleWriteHostsEntry(commandId, payload) {
   }
 }
 
+// ── SYNC_FEE_SCHEDULE ─────────────────────────────────────────────────────────
+// Fetches the office fee schedule from OD:
+// 1. GET /feescheds → find Normal, non-hidden schedules
+// 2. GET /fees?FeeSched=X for each → Amount + CodeNum
+// 3. GET /procedurecodes → map CodeNum → CDT code
+// Sends result to Railway as OD_FEE_SCHEDULE_PUSH.
+
+async function handleSyncFeeSchedule(commandId, payload) {
+  try {
+    // Step 1: get all fee schedules
+    const schedules = (await odGet("/feescheds")) ?? [];
+    const normalScheds = Array.isArray(schedules)
+      ? schedules.filter(
+          (s) => s.FeeSchedType === "Normal" && s.IsHidden !== "true",
+        )
+      : [];
+    if (normalScheds.length === 0) {
+      sendCommandResult(
+        commandId,
+        "SYNC_FEE_SCHEDULE",
+        "FAILED",
+        null,
+        "NO_FEE_SCHEDULES",
+        "No Normal fee schedules found",
+      );
+      return;
+    }
+    log(`[FeeSchedule] Found ${normalScheds.length} Normal fee schedules`);
+
+    // Step 2: fetch procedure codes to map CodeNum → { cdt_code, description }
+    let codeMap = {};
+    try {
+      const procs = (await odGet("/procedurecodes")) ?? [];
+      if (Array.isArray(procs)) {
+        for (const p of procs) {
+          if (p.CodeNum && p.ProcCode) {
+            codeMap[p.CodeNum] = {
+              cdt_code: p.ProcCode,
+              description:
+                p.Descript ?? p.Description ?? p.AbbrDesc ?? p.ProcCode,
+            };
+          }
+        }
+      }
+      log(
+        `[FeeSchedule] Mapped ${Object.keys(codeMap).length} procedure codes`,
+      );
+    } catch (e) {
+      log(`[FeeSchedule] Proc code fetch error: ${e.message}`);
+    }
+
+    // Step 3: fetch fees for each schedule (limit to first 3 Normal schedules)
+    const feesBySchedule = [];
+    for (const sched of normalScheds.slice(0, 3)) {
+      try {
+        const fees = (await odGet(`/fees?FeeSched=${sched.FeeSchedNum}`)) ?? [];
+        if (Array.isArray(fees) && fees.length > 0) {
+          feesBySchedule.push({
+            FeeSchedNum: sched.FeeSchedNum,
+            Description: sched.Description,
+            IsGlobal: sched.IsGlobal,
+            fees: fees.map((f) => ({
+              CodeNum: f.CodeNum,
+              cdt_code: codeMap[f.CodeNum]?.cdt_code ?? null,
+              proc_name: codeMap[f.CodeNum]?.description ?? null,
+              amount_cents: Math.round((Number(f.Amount) || 0) * 100),
+              ClinicNum: f.ClinicNum ?? 0,
+              ProvNum: f.ProvNum ?? 0,
+            })),
+          });
+          log(
+            `[FeeSchedule] ${sched.Description} (${sched.FeeSchedNum}): ${fees.length} fees`,
+          );
+        }
+      } catch (e) {
+        log(`[FeeSchedule] FeeSched ${sched.FeeSchedNum} error: ${e.message}`);
+      }
+    }
+
+    // Step 4: push to Railway
+    if (tunnel && tunnelOk) {
+      tunnel.send(
+        JSON.stringify({
+          type: "OD_FEE_SCHEDULE_PUSH",
+          office_id: config.office_id,
+          schedules: feesBySchedule,
+        }),
+      );
+    }
+
+    sendCommandResult(commandId, "SYNC_FEE_SCHEDULE", "COMPLETED", {
+      schedules_synced: feesBySchedule.length,
+      total_fees: feesBySchedule.reduce((sum, s) => sum + s.fees.length, 0),
+      schedule_names: feesBySchedule.map((s) => s.Description),
+    });
+  } catch (e) {
+    sendCommandResult(
+      commandId,
+      "SYNC_FEE_SCHEDULE",
+      "FAILED",
+      null,
+      "SYNC_ERROR",
+      e.message.slice(0, 200),
+    );
+  }
+}
+
 // ─── Tunnel to EDiFi Cloud ────────────────────────────────────────────────────
 
 let tunnel = null;
@@ -2264,24 +2375,45 @@ function connectTunnel() {
           // Step 1: Try direct base64 endpoints (some OD versions)
           let b64 = null;
           let usedEndpoint = "none";
-          for (const ep of [`/patientimage?PatNum=${pat_num}`, `/patientimage?PatNum=${pat_num}&imageType=0`]) {
+          for (const ep of [
+            `/patientimage?PatNum=${pat_num}`,
+            `/patientimage?PatNum=${pat_num}&imageType=0`,
+          ]) {
             try {
               const r = await odGet(ep);
               const item = Array.isArray(r) ? r[0] : r;
               if (item) {
-                const c = item.ImgB64 ?? item.ImageData ?? item.imageData ?? item.Data ?? item.data ?? item.Image ?? item.image ?? null;
-                if (c) { b64 = c; usedEndpoint = ep; break; }
+                const c =
+                  item.ImgB64 ??
+                  item.ImageData ??
+                  item.imageData ??
+                  item.Data ??
+                  item.data ??
+                  item.Image ??
+                  item.image ??
+                  null;
+                if (c) {
+                  b64 = c;
+                  usedEndpoint = ep;
+                  break;
+                }
               }
             } catch {}
           }
           // Step 2: /documents endpoint returns filePath — read file from OD AtoZ folder
           if (!b64) {
             try {
-              const docs = await odGet(`/documents?PatNum=${pat_num}&docCategory=1`);
-              const arr = Array.isArray(docs) ? docs : (docs ? [docs] : []);
-              const photoDoc = arr.find((d) =>
-                d && d.filePath && String(d.filePath).match(/\.(jpg|jpeg|png|bmp|gif)$/i)
-              ) ?? arr[0];
+              const docs = await odGet(
+                `/documents?PatNum=${pat_num}&docCategory=1`,
+              );
+              const arr = Array.isArray(docs) ? docs : docs ? [docs] : [];
+              const photoDoc =
+                arr.find(
+                  (d) =>
+                    d &&
+                    d.filePath &&
+                    String(d.filePath).match(/\.(jpg|jpeg|png|bmp|gif)$/i),
+                ) ?? arr[0];
               if (photoDoc?.filePath) {
                 const imgPath = String(photoDoc.filePath);
                 usedEndpoint = "documents/filePath";
