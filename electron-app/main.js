@@ -2256,6 +2256,25 @@ function connectTunnel() {
           );
         }
       }
+      // OD_PHOTO_REQUEST — server asks for patient portrait from OD image table.
+      // Returns base64-encoded JPEG if found. PHI: transmitted over encrypted WSS only, never logged.
+      if (msg.type === "OD_PHOTO_REQUEST") {
+        const { scrape_id, pat_num } = msg;
+        try {
+          const result = await odGet(`/patientimage?PatNum=${pat_num}&IncludeThumb=1`);
+          const imageData = Array.isArray(result) ? result[0] : result;
+          const b64 = imageData?.ImgB64 ?? imageData?.ImageData ?? imageData?.Data ?? null;
+          tunnel.send(JSON.stringify({
+            type: "OD_PHOTO_RESPONSE",
+            scrape_id,
+            pat_num,
+            found: !!b64,
+            image_b64: b64,
+          }));
+        } catch (e) {
+          tunnel.send(JSON.stringify({ type: "OD_PHOTO_RESPONSE", scrape_id, pat_num, found: false, image_b64: null }));
+        }
+      }
       if (msg.type === "OD_PUSH_ACK") {
         log(
           `[OD Sync] ACK: ${msg.patients_processed} patients, ${msg.verifications_queued} verifications for ${msg.date}`,
