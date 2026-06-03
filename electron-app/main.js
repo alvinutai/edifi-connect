@@ -3039,6 +3039,7 @@ async function syncODData(syncDate = null) {
               benefit_notes_present,
               operatory_name: operatoryMap[Number(apt.OperatoryNum)] ?? null,
               note: apt.Note ?? null,
+              proc_descript: apt.ProcDescript ?? null,
               proc_codes: procCodes,
               fee_appt_cents: feeApptCents,
               est_patient_cents: estPatientCents,
