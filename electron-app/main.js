@@ -1088,13 +1088,16 @@ async function handlePullOdClaimprocs(commandId, payload) {
         (a) =>
           a.AptStatus === "Scheduled" ||
           a.AptStatus === 1 ||
-          a.AptStatus === "1",
+          a.AptStatus === "1" ||
+          a.AptStatus === "Complete" ||
+          a.AptStatus === 2 ||
+          a.AptStatus === "2",
       )
     : [];
 
-  // Use last 30 days for rate calculation — most recent and accurate
+  // Use last 12 months for rate calculation — full plan year of history
   const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - 30);
+  cutoffDate.setDate(cutoffDate.getDate() - 365);
   const cutoffStr = cutoffDate.toISOString().slice(0, 10);
   const patients = [];
   let errors = 0;
