@@ -2257,7 +2257,24 @@ let tunnel = null;
 let tunnelOk = false;
 let reconnectTimer = null;
 let odSyncInterval = null;
+let dailySyncInterval = null;
 let lastOdSync = null;
+
+// Auto-runs claimprocs + fee schedule once daily — no manual permission required.
+async function autoRunClaimprocsAndFees(syncDate) {
+  if (!tunnelOk || !tunnel) return;
+  log(`[AutoSync] Running daily claimprocs + fee schedule for ${syncDate}...`);
+  try {
+    await handlePullOdClaimprocs("auto-claimprocs", { sync_date: syncDate });
+  } catch (e) {
+    log(`[AutoSync] Claimprocs error: ${e.message}`);
+  }
+  try {
+    await handleSyncFeeSchedule("auto-feesched", {});
+  } catch (e) {
+    log(`[AutoSync] Fee schedule error: ${e.message}`);
+  }
+}
 
 function connectTunnel() {
   if (!config.registered || !config.office_id) return;
@@ -2292,6 +2309,22 @@ function connectTunnel() {
       syncODMySql();
       if (odSyncInterval) clearInterval(odSyncInterval);
       odSyncInterval = setInterval(syncODMySql, 15 * 60 * 1000);
+    }
+    // Auto-run claimprocs + fee schedule on connect (after 60s to let initial OD sync settle)
+    // then every 24h — no manual permission needed, just needs CONNECT_REMOTE_OD_SYNC_ENABLED.
+    if (odSyncInterval) {
+      setTimeout(() => {
+        const today = new Date().toISOString().split("T")[0];
+        autoRunClaimprocsAndFees(today);
+      }, 60 * 1000);
+      if (dailySyncInterval) clearInterval(dailySyncInterval);
+      dailySyncInterval = setInterval(
+        () => {
+          const today = new Date().toISOString().split("T")[0];
+          autoRunClaimprocsAndFees(today);
+        },
+        24 * 60 * 60 * 1000,
+      );
     }
   });
 
@@ -2508,6 +2541,10 @@ function connectTunnel() {
     if (odSyncInterval) {
       clearInterval(odSyncInterval);
       odSyncInterval = null;
+    }
+    if (dailySyncInterval) {
+      clearInterval(dailySyncInterval);
+      dailySyncInterval = null;
     }
     if (!reconnectTimer) {
       log("Tunnel disconnected — reconnecting in 5s");
