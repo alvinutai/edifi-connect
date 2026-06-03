@@ -2263,39 +2263,71 @@ function connectTunnel() {
         try {
           // Try multiple endpoint formats — OD version differences
           let result = null;
-          const endpoints = [
+          let usedEndpoint = "none";
+          const tryEndpoints = [
             `/patientimage?PatNum=${pat_num}`,
             `/patientimage?PatNum=${pat_num}&imageType=0`,
-            `/patients/${pat_num}/portrait`,
+            `/documents?PatNum=${pat_num}&docCategory=1`,
           ];
-          for (const ep of endpoints) {
+          for (const ep of tryEndpoints) {
             try {
               const r = await odGet(ep);
-              if (r && (Array.isArray(r) ? r.length > 0 : Object.keys(r || {}).length > 0)) {
+              if (
+                r &&
+                (Array.isArray(r)
+                  ? r.length > 0
+                  : Object.keys(r || {}).length > 0)
+              ) {
                 result = r;
-                log(`[Photo] Found image at ${ep} — keys: ${JSON.stringify(Object.keys(Array.isArray(r) ? (r[0] || {}) : r))}`);
+                usedEndpoint = ep;
+                log(
+                  `[Photo] Found data at ${ep} — keys: ${JSON.stringify(Object.keys(Array.isArray(r) ? r[0] || {} : r))}`,
+                );
                 break;
               }
             } catch {}
           }
           const imageData = Array.isArray(result) ? result[0] : result;
-          // Try all known field names for base64 image data across OD versions
-          const b64 = imageData?.ImgB64 ?? imageData?.ImageData ?? imageData?.imageData ??
-            imageData?.Data ?? imageData?.data ?? imageData?.Image ?? imageData?.image ??
-            imageData?.Bytes ?? imageData?.bytes ?? imageData?.base64 ?? null;
+          const b64 =
+            imageData?.ImgB64 ??
+            imageData?.ImageData ??
+            imageData?.imageData ??
+            imageData?.Data ??
+            imageData?.data ??
+            imageData?.Image ??
+            imageData?.image ??
+            imageData?.Bytes ??
+            imageData?.bytes ??
+            imageData?.base64 ??
+            null;
+          const responseKeys = imageData ? Object.keys(imageData) : [];
           if (!b64 && imageData) {
-            log(`[Photo] PatNum=${pat_num} image found but field unknown — keys: ${JSON.stringify(Object.keys(imageData))}`);
+            log(
+              `[Photo] PatNum=${pat_num} no image field — keys: ${JSON.stringify(responseKeys)}`,
+            );
           }
-          tunnel.send(JSON.stringify({
-            type: "OD_PHOTO_RESPONSE",
-            scrape_id,
-            pat_num,
-            found: !!b64,
-            image_b64: b64,
-          }));
+          tunnel.send(
+            JSON.stringify({
+              type: "OD_PHOTO_RESPONSE",
+              scrape_id,
+              pat_num,
+              found: !!b64,
+              image_b64: b64,
+              endpoint: usedEndpoint,
+              response_keys: responseKeys,
+            }),
+          );
         } catch (e) {
           log(`[Photo] PatNum=${pat_num} error: ${e.message}`);
-          tunnel.send(JSON.stringify({ type: "OD_PHOTO_RESPONSE", scrape_id, pat_num, found: false, image_b64: null }));
+          tunnel.send(
+            JSON.stringify({
+              type: "OD_PHOTO_RESPONSE",
+              scrape_id,
+              pat_num,
+              found: false,
+              image_b64: null,
+            }),
+          );
         }
       }
       if (msg.type === "OD_PUSH_ACK") {
