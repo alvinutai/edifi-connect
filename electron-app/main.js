@@ -2261,9 +2261,31 @@ function connectTunnel() {
       if (msg.type === "OD_PHOTO_REQUEST") {
         const { scrape_id, pat_num } = msg;
         try {
-          const result = await odGet(`/patientimage?PatNum=${pat_num}&IncludeThumb=1`);
+          // Try multiple endpoint formats — OD version differences
+          let result = null;
+          const endpoints = [
+            `/patientimage?PatNum=${pat_num}`,
+            `/patientimage?PatNum=${pat_num}&imageType=0`,
+            `/patients/${pat_num}/portrait`,
+          ];
+          for (const ep of endpoints) {
+            try {
+              const r = await odGet(ep);
+              if (r && (Array.isArray(r) ? r.length > 0 : Object.keys(r || {}).length > 0)) {
+                result = r;
+                log(`[Photo] Found image at ${ep} — keys: ${JSON.stringify(Object.keys(Array.isArray(r) ? (r[0] || {}) : r))}`);
+                break;
+              }
+            } catch {}
+          }
           const imageData = Array.isArray(result) ? result[0] : result;
-          const b64 = imageData?.ImgB64 ?? imageData?.ImageData ?? imageData?.Data ?? null;
+          // Try all known field names for base64 image data across OD versions
+          const b64 = imageData?.ImgB64 ?? imageData?.ImageData ?? imageData?.imageData ??
+            imageData?.Data ?? imageData?.data ?? imageData?.Image ?? imageData?.image ??
+            imageData?.Bytes ?? imageData?.bytes ?? imageData?.base64 ?? null;
+          if (!b64 && imageData) {
+            log(`[Photo] PatNum=${pat_num} image found but field unknown — keys: ${JSON.stringify(Object.keys(imageData))}`);
+          }
           tunnel.send(JSON.stringify({
             type: "OD_PHOTO_RESPONSE",
             scrape_id,
@@ -2272,6 +2294,7 @@ function connectTunnel() {
             image_b64: b64,
           }));
         } catch (e) {
+          log(`[Photo] PatNum=${pat_num} error: ${e.message}`);
           tunnel.send(JSON.stringify({ type: "OD_PHOTO_RESPONSE", scrape_id, pat_num, found: false, image_b64: null }));
         }
       }
