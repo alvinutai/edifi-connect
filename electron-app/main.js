@@ -2672,31 +2672,89 @@ async function getOdCovCats() {
         let cat = "GENERAL";
         // Exact OD names take priority over keyword matching
         if (desc === "DIAGNOSTIC" || desc.includes("DIAGN")) cat = "DIAGNOSTIC";
-        else if (desc === "X-RAY" || desc.includes("X-RAY") || desc.includes("XRAY") || desc.includes("RADIOGRAPH")) cat = "X_RAY";
-        else if (desc === "PREVENTIVE" || desc.includes("PREVENT")) cat = "PREVENTIVE";
-        else if (desc === "RESTORATIVE" || desc.includes("RESTOR") || desc === "BASIC") cat = "BASIC";
+        else if (
+          desc === "X-RAY" ||
+          desc.includes("X-RAY") ||
+          desc.includes("XRAY") ||
+          desc.includes("RADIOGRAPH")
+        )
+          cat = "X_RAY";
+        else if (desc === "PREVENTIVE" || desc.includes("PREVENT"))
+          cat = "PREVENTIVE";
+        else if (
+          desc === "RESTORATIVE" ||
+          desc.includes("RESTOR") ||
+          desc === "BASIC"
+        )
+          cat = "BASIC";
         else if (desc === "ENDO" || desc.includes("ENDO")) cat = "ENDODONTIC";
-        else if (desc === "PERIO" || desc.startsWith("D4346") || desc.includes("PERIO") || desc.includes("SCALING") || desc.includes("INFLAM") || desc.includes("SRP")) cat = "PERIODONTIC";
-        else if (desc === "ORAL SURGERY" || desc.includes("ORAL") || desc.includes("SURGERY")) cat = "ORAL_SURGERY";
+        else if (
+          desc === "PERIO" ||
+          desc.startsWith("D4346") ||
+          desc.includes("PERIO") ||
+          desc.includes("SCALING") ||
+          desc.includes("INFLAM") ||
+          desc.includes("SRP")
+        )
+          cat = "PERIODONTIC";
+        else if (
+          desc === "ORAL SURGERY" ||
+          desc.includes("ORAL") ||
+          desc.includes("SURGERY")
+        )
+          cat = "ORAL_SURGERY";
         else if (desc === "CROWNS" || desc === "CROWN") cat = "CROWNS";
-        else if (desc === "PROSTH" || desc === "PROSTHODONTICS" || desc.includes("PROSTHO") || desc.includes("BRIDGE")) cat = "PROSTHODONTIA";
-        else if (desc === "IMPLANT" || desc.includes("IMPLANT")) cat = "IMPLANT";
-        else if (desc === "BU" || desc === "BUILDUPS" || desc.includes("BUILDUP") || desc.includes("BUILD UP")) cat = "BUILDUPS";
-        else if (desc === "PULP CAP" || desc === "PULP_CAP" || (desc.includes("PULP") && desc.includes("CAP"))) cat = "PULP_CAP";
-        else if (desc === "ONLAY" || desc === "ONLAYS" || desc.includes("ONLAY")) cat = "ONLAYS";
-        else if (desc === "NG" || desc.includes("NIGHT GUARD") || desc.includes("NIGHTGUARD") || desc.includes("OCCLUSAL GUARD")) cat = "NIGHT_GUARD";
-        else if (desc === "ARESTIN" || desc.includes("ARESTIN")) cat = "ARESTIN";
+        else if (
+          desc === "PROSTH" ||
+          desc === "PROSTHODONTICS" ||
+          desc.includes("PROSTHO") ||
+          desc.includes("BRIDGE")
+        )
+          cat = "PROSTHODONTIA";
+        else if (desc === "IMPLANT" || desc.includes("IMPLANT"))
+          cat = "IMPLANT";
+        else if (
+          desc === "BU" ||
+          desc === "BUILDUPS" ||
+          desc.includes("BUILDUP") ||
+          desc.includes("BUILD UP")
+        )
+          cat = "BUILDUPS";
+        else if (
+          desc === "PULP CAP" ||
+          desc === "PULP_CAP" ||
+          (desc.includes("PULP") && desc.includes("CAP"))
+        )
+          cat = "PULP_CAP";
+        else if (
+          desc === "ONLAY" ||
+          desc === "ONLAYS" ||
+          desc.includes("ONLAY")
+        )
+          cat = "ONLAYS";
+        else if (
+          desc === "NG" ||
+          desc.includes("NIGHT GUARD") ||
+          desc.includes("NIGHTGUARD") ||
+          desc.includes("OCCLUSAL GUARD")
+        )
+          cat = "NIGHT_GUARD";
+        else if (desc === "ARESTIN" || desc.includes("ARESTIN"))
+          cat = "ARESTIN";
         else if (desc === "MAJOR" || desc.includes("MAJOR")) cat = "MAJOR";
-        else if (desc === "ORTHODONTIC" || desc.includes("ORTHO")) cat = "ORTHODONTIC";
+        else if (desc === "ORTHODONTIC" || desc.includes("ORTHO"))
+          cat = "ORTHODONTIC";
         else if (desc.includes("FLUORIDE")) cat = "FLUORIDE";
         else if (desc.includes("SEALANT")) cat = "SEALANTS";
         else if (desc.includes("EXAM")) cat = "EXAM";
-        else if (desc.includes("PROPHY") || desc.includes("CLEANING")) cat = "PROPHY";
+        else if (desc.includes("PROPHY") || desc.includes("CLEANING"))
+          cat = "PROPHY";
         else if (desc.includes("WAIT")) cat = "WAITING_PERIOD";
         else if (desc.includes("ANESTHESIA")) cat = "ANESTHESIA";
         else if (desc.includes("EMERGENCY")) cat = "EMERGENCY";
         else if (desc.includes("DENTURE")) cat = "DENTURES";
-        else if (desc.includes("MAXILLOFACIAL") || desc.includes("ACCIDENT")) cat = "ACCIDENT";
+        else if (desc.includes("MAXILLOFACIAL") || desc.includes("ACCIDENT"))
+          cat = "ACCIDENT";
         else if (desc) {
           const cleaned = desc
             .replace(/[_-]+/g, " ")
@@ -4317,7 +4375,12 @@ app.whenReady().then(() => {
       update_status.downloaded = true;
       update_status.last_download_at = new Date().toISOString();
       update_status.last_error = null;
-      log("[Updater] Update ready — installing silently on next quit");
+      log("[Updater] Update downloaded — auto-installing in 10 seconds");
+      // Auto-install 10 seconds after download — no manual trigger needed
+      setTimeout(() => {
+        log("[Updater] Auto-installing update now");
+        autoUpdater.quitAndInstall(true, true);
+      }, 10_000);
     });
     autoUpdater.on("error", (err) => {
       update_status.checking = false;
