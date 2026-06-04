@@ -2601,6 +2601,19 @@ async function odGet(path) {
   }
 }
 
+async function odPut(path, body) {
+  const rawBase = config.od_api_url;
+  if (!rawBase) return null;
+  const trimmed = rawBase.replace(/\/+$/, "");
+  const base = trimmed.endsWith("/api/v1") ? trimmed : `${trimmed}/api/v1`;
+  const axios = require("axios");
+  const r = await axios.put(`${base}${path}`, body, {
+    timeout: 10000,
+    headers: { ...odAuthHeader(), "Content-Type": "application/json" },
+  });
+  return r.data;
+}
+
 // Fetches all operatories once per sync and returns { operatoryNum → name }.
 // Fail-open — returns empty map so a missing endpoint never blocks the sync.
 async function getOperatoryMap() {
@@ -2746,7 +2759,15 @@ function mapOdApiBenefits(rawBenefits) {
     }
     const category = catMap[b.CovCatNum] || "GENERAL";
     const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
-    const entry = { type, category, coverage_level };
+    const entry = {
+      type,
+      category,
+      coverage_level,
+      benefit_num: b.BenefitNum ?? null,
+      cov_cat_num: Number(b.CovCatNum) || 0,
+      plan_num: Number(b.PlanNum) || 0,
+      pat_plan_num: Number(b.PatPlanNum) || 0,
+    };
     if (type === "CoInsurance") {
       entry.percent = Number(b.Percent);
     } else if (type === "Deductible") {
@@ -3210,59 +3231,79 @@ async function writebackToOD(snapshotId, fields) {
     );
   }
 
-  const axios = require("axios");
   const written = [];
+  const errors = [];
 
-  // Open Dental Web Service uses REST endpoints on PatPlan/InsSub for insurance fields.
-  // We look up the PatPlanNum by matching the snapshot_id we stored in OD's Note field
-  // on the last sync, then PATCH the insurance fields.
-  // Since we don't store OD PatPlanNum directly, we use the eligibility_status note
-  // approach: write fields to the PatPlan note field as structured text.
-  // Full OD insurance API write-back (D2000 equivalent) requires knowing PatPlanNum
-  // which is available on the Electron side from the last OD sync cache.
-
-  try {
-    // Attempt to POST fields to a custom EDiFi endpoint on the OD Web Service bridge.
-    // The OD Web Service doesn't have a native benefit write-back — this posts to the
-    // local bridge's /writeback endpoint which the office's IT can configure.
-    const r = await axios.post(
-      `${config.od_api_url}/edifi/writeback`,
-      {
-        snapshot_id: snapshotId,
-        fields: {
-          eligibility_status: fields.eligibility_status,
-          individual_deductible_remaining:
-            fields.individual_deductible_remaining,
-          annual_maximum_remaining: fields.annual_maximum_remaining,
-          benefit_year_type: fields.benefit_year_type,
-        },
-        source: "edifi_verified",
-      },
-      { timeout: 10000 },
-    );
-
-    if (r.data?.success) {
-      written.push(...Object.keys(fields));
-      log(
-        `[Writeback] Snapshot ${snapshotId} written OK: ${written.join(", ")}`,
-      );
-      return { success: true, fields_written: written };
+  // ── 1. Write benefit % rows via PUT /benefits/{BenefitNum} ──────────────────
+  // Each coverage_matrix row now carries benefit_num from the original OD pull.
+  // We update Percent for CoInsurance rows and Quantity/TimePeriod for Limitations.
+  if (Array.isArray(fields.benefit_rows) && fields.benefit_rows.length > 0) {
+    for (const row of fields.benefit_rows) {
+      if (!row.benefit_num) continue;
+      try {
+        await odPut(`/benefits/${row.benefit_num}`, {
+          BenefitNum: row.benefit_num,
+          PlanNum: row.plan_num || 0,
+          PatPlanNum: row.pat_plan_num || 0,
+          CovCatNum: row.cov_cat_num || 0,
+          BenefitType: "CoInsurance",
+          Percent: row.percent ?? 0,
+          MonetaryAmt: -1,
+          TimePeriod: "CalendarYear",
+          QuantityQualifier: "None",
+          Quantity: 0,
+          CodeNum: 0,
+          CoverageLevel: "None",
+        });
+        written.push(`benefit_${row.benefit_num}_${row.category}`);
+        log(
+          `[Writeback] PUT /benefits/${row.benefit_num} (${row.category}): ${row.percent}%`,
+        );
+      } catch (e) {
+        errors.push(`benefit_${row.benefit_num}: ${e.message.slice(0, 80)}`);
+        log(
+          `[Writeback] Failed PUT /benefits/${row.benefit_num} (${row.category}): ${e.message}`,
+        );
+      }
     }
-
     log(
-      `[Writeback] Snapshot ${snapshotId} OD returned failure: ${JSON.stringify(r.data)}`,
+      `[Writeback] Snapshot ${snapshotId} — ${written.length} rows written, ${errors.length} failed`,
     );
-    return { success: false, fields_written: [] };
-  } catch (err) {
-    // 404 = endpoint not yet configured on this office's OD bridge — non-fatal
-    if (err.response?.status === 404) {
-      log(
-        `[Writeback] OD writeback endpoint not available for this office (404) — skipping`,
-      );
-      return { success: false, fields_written: [] };
-    }
-    throw err;
+  } else {
+    log(
+      `[Writeback] Snapshot ${snapshotId} — no benefit_rows provided (old snapshot, re-sync to populate BenefitNums)`,
+    );
   }
+
+  // ── 2. Write eligibility verification note to InsSub ───────────────────────
+  // Best-effort: stamps "EDiFi Verified YYYY-MM-DD" into the plan note field.
+  if (fields.pat_plan_num && fields.eligibility_status) {
+    try {
+      const note = `EDiFi Verified ${new Date().toISOString().slice(0, 10)} — ${fields.eligibility_status}`;
+      const insSubs = await odGet(
+        `/insplans?PatPlanNum=${fields.pat_plan_num}`,
+      );
+      const insSub = Array.isArray(insSubs) ? insSubs[0] : insSubs;
+      if (insSub?.InsSubNum) {
+        await odPut(`/insplans/${insSub.InsSubNum}`, {
+          ...insSub,
+          Note: note,
+        });
+        written.push("plan_note");
+        log(
+          `[Writeback] Plan note updated for PatPlanNum ${fields.pat_plan_num}`,
+        );
+      }
+    } catch (e) {
+      log(`[Writeback] Plan note update failed: ${e.message}`);
+    }
+  }
+
+  return {
+    success: written.length > 0,
+    fields_written: written,
+    errors,
+  };
 }
 
 async function handleScrape(req) {
