@@ -2670,55 +2670,41 @@ async function getOdCovCats() {
         // Map EbenefitCat to category code; fall back to description-based detection
         const desc = (c.Description || "").toUpperCase();
         let cat = "GENERAL";
-        if (desc.includes("PREVENT")) cat = "PREVENTIVE";
-        else if (desc.includes("BASIC") || desc.includes("RESTOR"))
-          cat = "BASIC";
-        else if (desc.includes("MAJOR")) cat = "MAJOR";
-        else if (desc.includes("ENDO")) cat = "ENDODONTIC";
-        else if (desc.includes("PERIO")) cat = "PERIODONTIC";
-        else if (desc.includes("ORAL") || desc.includes("SURGERY"))
-          cat = "ORAL_SURGERY";
-        else if (desc.includes("ORTHO")) cat = "ORTHODONTIC";
-        else if (desc.includes("IMPLANT")) cat = "IMPLANT";
-        else if (
-          desc.includes("PROSTHO") ||
-          desc.includes("CROWN") ||
-          desc.includes("BRIDGE")
-        )
-          cat = "PROSTHODONTIA";
-        else if (desc.includes("DIAGN")) cat = "DIAGNOSTIC";
-        else if (desc.includes("BUILDUP") || desc.includes("BUILD UP"))
-          cat = "BUILDUPS";
-        else if (
-          desc.includes("NIGHT GUARD") ||
-          desc.includes("NIGHTGUARD") ||
-          desc.includes("OCCLUSAL GUARD")
-        )
-          cat = "NIGHT_GUARD";
-        else if (desc.includes("ARESTIN")) cat = "ARESTIN";
-        else if (desc.includes("WAIT")) cat = "WAITING_PERIOD";
+        // Exact OD names take priority over keyword matching
+        if (desc === "DIAGNOSTIC" || desc.includes("DIAGN")) cat = "DIAGNOSTIC";
+        else if (desc === "X-RAY" || desc.includes("X-RAY") || desc.includes("XRAY") || desc.includes("RADIOGRAPH")) cat = "X_RAY";
+        else if (desc === "PREVENTIVE" || desc.includes("PREVENT")) cat = "PREVENTIVE";
+        else if (desc === "RESTORATIVE" || desc.includes("RESTOR") || desc === "BASIC") cat = "BASIC";
+        else if (desc === "ENDO" || desc.includes("ENDO")) cat = "ENDODONTIC";
+        else if (desc === "PERIO" || desc.startsWith("D4346") || desc.includes("PERIO") || desc.includes("SCALING") || desc.includes("INFLAM") || desc.includes("SRP")) cat = "PERIODONTIC";
+        else if (desc === "ORAL SURGERY" || desc.includes("ORAL") || desc.includes("SURGERY")) cat = "ORAL_SURGERY";
+        else if (desc === "CROWNS" || desc === "CROWN") cat = "CROWNS";
+        else if (desc === "PROSTH" || desc === "PROSTHODONTICS" || desc.includes("PROSTHO") || desc.includes("BRIDGE")) cat = "PROSTHODONTIA";
+        else if (desc === "IMPLANT" || desc.includes("IMPLANT")) cat = "IMPLANT";
+        else if (desc === "BU" || desc === "BUILDUPS" || desc.includes("BUILDUP") || desc.includes("BUILD UP")) cat = "BUILDUPS";
+        else if (desc === "PULP CAP" || desc === "PULP_CAP" || (desc.includes("PULP") && desc.includes("CAP"))) cat = "PULP_CAP";
+        else if (desc === "ONLAY" || desc === "ONLAYS" || desc.includes("ONLAY")) cat = "ONLAYS";
+        else if (desc === "NG" || desc.includes("NIGHT GUARD") || desc.includes("NIGHTGUARD") || desc.includes("OCCLUSAL GUARD")) cat = "NIGHT_GUARD";
+        else if (desc === "ARESTIN" || desc.includes("ARESTIN")) cat = "ARESTIN";
+        else if (desc === "MAJOR" || desc.includes("MAJOR")) cat = "MAJOR";
+        else if (desc === "ORTHODONTIC" || desc.includes("ORTHO")) cat = "ORTHODONTIC";
         else if (desc.includes("FLUORIDE")) cat = "FLUORIDE";
         else if (desc.includes("SEALANT")) cat = "SEALANTS";
-        else if (
-          desc.includes("RADIOGRAPH") ||
-          desc.includes("X-RAY") ||
-          desc.includes("XRAY")
-        )
-          cat = "X_RAY";
         else if (desc.includes("EXAM")) cat = "EXAM";
-        else if (desc.includes("PROPHY") || desc.includes("CLEANING"))
-          cat = "PROPHY";
-        else if (desc.includes("SCALING") || desc.includes("SRP"))
-          cat = "PERIODONTIC";
+        else if (desc.includes("PROPHY") || desc.includes("CLEANING")) cat = "PROPHY";
+        else if (desc.includes("WAIT")) cat = "WAITING_PERIOD";
         else if (desc.includes("ANESTHESIA")) cat = "ANESTHESIA";
         else if (desc.includes("EMERGENCY")) cat = "EMERGENCY";
+        else if (desc.includes("DENTURE")) cat = "DENTURES";
+        else if (desc.includes("MAXILLOFACIAL") || desc.includes("ACCIDENT")) cat = "ACCIDENT";
         else if (desc) {
-          // Use actual OD description — sanitize to uppercase underscored
-          cat =
-            desc
-              .replace(/[^A-Z0-9]+/g, "_")
-              .replace(/^_|_$/g, "")
-              .substring(0, 30) || "GENERAL";
+          const cleaned = desc
+            .replace(/[_-]+/g, " ")
+            .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
+            .replace(/\s+/g, "_")
+            .replace(/^_|_$/g, "")
+            .substring(0, 40);
+          cat = cleaned || "GENERAL";
         }
         map[c.CovCatNum] = cat;
       }
