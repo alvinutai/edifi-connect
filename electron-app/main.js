@@ -2687,21 +2687,38 @@ async function getOdCovCats() {
         )
           cat = "PROSTHODONTIA";
         else if (desc.includes("DIAGN")) cat = "DIAGNOSTIC";
-        else if (desc.includes("BUILDUP") || desc.includes("BUILD UP")) cat = "BUILDUPS";
-        else if (desc.includes("NIGHT GUARD") || desc.includes("NIGHTGUARD") || desc.includes("OCCLUSAL GUARD")) cat = "NIGHT_GUARD";
+        else if (desc.includes("BUILDUP") || desc.includes("BUILD UP"))
+          cat = "BUILDUPS";
+        else if (
+          desc.includes("NIGHT GUARD") ||
+          desc.includes("NIGHTGUARD") ||
+          desc.includes("OCCLUSAL GUARD")
+        )
+          cat = "NIGHT_GUARD";
         else if (desc.includes("ARESTIN")) cat = "ARESTIN";
         else if (desc.includes("WAIT")) cat = "WAITING_PERIOD";
         else if (desc.includes("FLUORIDE")) cat = "FLUORIDE";
         else if (desc.includes("SEALANT")) cat = "SEALANTS";
-        else if (desc.includes("RADIOGRAPH") || desc.includes("X-RAY") || desc.includes("XRAY")) cat = "X_RAY";
+        else if (
+          desc.includes("RADIOGRAPH") ||
+          desc.includes("X-RAY") ||
+          desc.includes("XRAY")
+        )
+          cat = "X_RAY";
         else if (desc.includes("EXAM")) cat = "EXAM";
-        else if (desc.includes("PROPHY") || desc.includes("CLEANING")) cat = "PROPHY";
-        else if (desc.includes("SCALING") || desc.includes("SRP")) cat = "PERIODONTIC";
+        else if (desc.includes("PROPHY") || desc.includes("CLEANING"))
+          cat = "PROPHY";
+        else if (desc.includes("SCALING") || desc.includes("SRP"))
+          cat = "PERIODONTIC";
         else if (desc.includes("ANESTHESIA")) cat = "ANESTHESIA";
         else if (desc.includes("EMERGENCY")) cat = "EMERGENCY";
         else if (desc) {
           // Use actual OD description — sanitize to uppercase underscored
-          cat = desc.replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "").substring(0, 30) || "GENERAL";
+          cat =
+            desc
+              .replace(/[^A-Z0-9]+/g, "_")
+              .replace(/^_|_$/g, "")
+              .substring(0, 30) || "GENERAL";
         }
         map[c.CovCatNum] = cat;
       }
@@ -2825,6 +2842,7 @@ async function syncODData(syncDate = null) {
     return;
   }
 
+  odCovCatCache = null; // refresh category map each sync — office may have added categories
   const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
@@ -2985,6 +3003,15 @@ async function syncODData(syncDate = null) {
                   if (Array.isArray(alt) && alt.length > 0) rawBenefits = alt;
                 }
                 if (Array.isArray(rawBenefits)) {
+                  // Deduplicate by BenefitNum — plan-level and patient-level queries
+                  // can return the same row. Keep first occurrence of each BenefitNum.
+                  const seenBenefitNums = new Set();
+                  rawBenefits = rawBenefits.filter((b) => {
+                    if (!b.BenefitNum) return true; // keep rows without ID
+                    if (seenBenefitNums.has(b.BenefitNum)) return false;
+                    seenBenefitNums.add(b.BenefitNum);
+                    return true;
+                  });
                   benefits = mapOdApiBenefits(rawBenefits);
                   // Accumulate diagnostic stats (metadata only, no PHI)
                   benefitStats.raw_benefit_rows_received += rawBenefits.length;
@@ -3074,6 +3101,10 @@ async function syncODData(syncDate = null) {
               plan_annual_max_cents,
               plan_deductible_cents,
               benefit_notes_present,
+              // Insurance plan notes from OD InsSub — shown in the NOTE box on the
+              // Appointment tab so staff sees insurance context separate from the
+              // visit procedures shown in the top NOTE banner.
+              benefit_note: primarySub?.BenefitNotes?.trim() || null,
               operatory_name: operatoryMap[Number(apt.OperatoryNum)] ?? null,
               note: apt.Note ?? null,
               proc_descript: apt.ProcDescript ?? null,

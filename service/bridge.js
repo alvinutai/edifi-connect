@@ -29,8 +29,20 @@ const EDIFI_CLOUD_WS = "wss://edifi-ai-eligibility-production.up.railway.app";
 const AGENT_INSTANCE_ID = randomUUID();
 const EDIFI_CLOUD_HTTP =
   "https://edifi-ai-eligibility-production.up.railway.app";
-const CONFIG_PATH = path.join(os.homedir(), "AppData", "Roaming", "edifi-connect", "config.json");
-const LOG_PATH = path.join(os.homedir(), "AppData", "Roaming", "edifi-connect", "edifi-connect.log");
+const CONFIG_PATH = path.join(
+  os.homedir(),
+  "AppData",
+  "Roaming",
+  "edifi-connect",
+  "config.json",
+);
+const LOG_PATH = path.join(
+  os.homedir(),
+  "AppData",
+  "Roaming",
+  "edifi-connect",
+  "edifi-connect.log",
+);
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -257,7 +269,9 @@ const PORTALS = [
 
 // Portal session capture requires the Electron tray app (browser window).
 // Service mode: no browser available — sessions must be captured via workstation tray app.
-async function checkPartitionCookies(_portal) { return null; }
+async function checkPartitionCookies(_portal) {
+  return null;
+}
 
 function announceSessions() {
   if (!tunnelOk || !tunnel) return;
@@ -305,7 +319,9 @@ async function loadSavedPortalSessions() {
 const portalWindows = {};
 // Portal windows require Electron GUI — not available in service mode.
 function openPortalWindow(portal) {
-  log(`[Service] Portal login for ${portal.payerName} requires the tray app on the workstation.`);
+  log(
+    `[Service] Portal login for ${portal.payerName} requires the tray app on the workstation.`,
+  );
 }
 
 // ─── Agent Hello ──────────────────────────────────────────────────────────────
@@ -337,7 +353,7 @@ async function sendAgentHello() {
   const hello = {
     type: "AGENT_HELLO",
     office_id: config.office_id,
-    app_version: "2.3.58-service",
+    app_version: "2.3.60-service",
     machine_id_hash: getMachineIdHash(),
     agent_instance_id: AGENT_INSTANCE_ID,
     os_platform: os.platform(),
@@ -350,7 +366,7 @@ async function sendAgentHello() {
 
   tunnel.send(JSON.stringify(hello));
   log(
-    `[RemoteControl] AGENT_HELLO sent: v${"2.3.58-service"} caps=${AGENT_CAPABILITIES.length}`,
+    `[RemoteControl] AGENT_HELLO sent: v${"2.3.60-service"} caps=${AGENT_CAPABILITIES.length}`,
   );
 }
 
@@ -569,7 +585,7 @@ function sendCommandResult(
 async function handleReportStatus(commandId) {
   const mysqlOk = await isMysqlAvailable().catch(() => false);
   const result = {
-    app_version: "2.3.58-service",
+    app_version: "2.3.60-service",
     agent_instance_id: AGENT_INSTANCE_ID,
     os_platform: os.platform(),
     uptime_seconds: Math.floor(process.uptime()),
@@ -624,7 +640,7 @@ async function handleReportConfigStatus(commandId) {
 
 async function handleReportUpdateStatus(commandId) {
   const result = {
-    current_version: "2.3.58-service",
+    current_version: "2.3.60-service",
     ...update_status,
   };
   sendCommandResult(commandId, "REPORT_UPDATE_STATUS", "COMPLETED", result);
@@ -652,14 +668,17 @@ async function handleCheckForUpdate(commandId) {
     update_status.last_error = null;
     // autoUpdater not available in service mode — updates handled via npm/NSSM restart
     const checkResult = null;
-    sendCommandResult(commandId, "CHECK_FOR_UPDATE", "COMPLETED", { update_available: false, note: "Service mode: update manually via npm" });
+    sendCommandResult(commandId, "CHECK_FOR_UPDATE", "COMPLETED", {
+      update_available: false,
+      note: "Service mode: update manually via npm",
+    });
     return;
     update_status.checking = false;
     const updateAvailable = !!checkResult?.updateInfo;
     update_status.available = updateAvailable;
     sendCommandResult(commandId, "CHECK_FOR_UPDATE", "COMPLETED", {
       update_available: updateAvailable,
-      current_version: "2.3.58-service",
+      current_version: "2.3.60-service",
       latest_version: checkResult?.updateInfo?.version ?? null,
     });
   } catch (e) {
@@ -682,7 +701,7 @@ async function handleDownloadUpdate(commandId) {
   if (update_status.downloaded) {
     sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
       already_downloaded: true,
-      current_version: "2.3.58-service",
+      current_version: "2.3.60-service",
     });
     return;
   }
@@ -701,7 +720,7 @@ async function handleDownloadUpdate(commandId) {
   sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
     download_in_progress: true,
     note: "autoDownload is enabled; download will complete in background",
-    current_version: "2.3.58-service",
+    current_version: "2.3.60-service",
   });
 }
 
@@ -1817,7 +1836,9 @@ async function handleQuitAndInstall(commandId) {
   });
   log("[RemoteControl] Quitting and installing update on server command");
   // Service mode: NSSM will restart the process — just exit
-  setTimeout(() => { process.exit(0); }, 500);
+  setTimeout(() => {
+    process.exit(0);
+  }, 500);
 }
 
 // ── REPORT_PORT_STATUS ────────────────────────────────────────────────────────
@@ -2593,6 +2614,38 @@ async function getOdCovCats() {
         )
           cat = "PROSTHODONTIA";
         else if (desc.includes("DIAGN")) cat = "DIAGNOSTIC";
+        else if (desc.includes("BUILDUP") || desc.includes("BUILD UP"))
+          cat = "BUILDUPS";
+        else if (
+          desc.includes("NIGHT GUARD") ||
+          desc.includes("NIGHTGUARD") ||
+          desc.includes("OCCLUSAL GUARD")
+        )
+          cat = "NIGHT_GUARD";
+        else if (desc.includes("ARESTIN")) cat = "ARESTIN";
+        else if (desc.includes("WAIT")) cat = "WAITING_PERIOD";
+        else if (desc.includes("FLUORIDE")) cat = "FLUORIDE";
+        else if (desc.includes("SEALANT")) cat = "SEALANTS";
+        else if (
+          desc.includes("RADIOGRAPH") ||
+          desc.includes("X-RAY") ||
+          desc.includes("XRAY")
+        )
+          cat = "X_RAY";
+        else if (desc.includes("EXAM")) cat = "EXAM";
+        else if (desc.includes("PROPHY") || desc.includes("CLEANING"))
+          cat = "PROPHY";
+        else if (desc.includes("SCALING") || desc.includes("SRP"))
+          cat = "PERIODONTIC";
+        else if (desc.includes("ANESTHESIA")) cat = "ANESTHESIA";
+        else if (desc.includes("EMERGENCY")) cat = "EMERGENCY";
+        else if (desc) {
+          cat =
+            desc
+              .replace(/[^A-Z0-9]+/g, "_")
+              .replace(/^_|_$/g, "")
+              .substring(0, 30) || "GENERAL";
+        }
         map[c.CovCatNum] = cat;
       }
       odCovCatCache = map;
@@ -2665,7 +2718,15 @@ function mapOdApiBenefits(rawBenefits) {
     }
     const category = catMap[b.CovCatNum] || "GENERAL";
     const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
-    const entry = { type, category, coverage_level };
+    const entry = {
+      type,
+      category,
+      coverage_level,
+      benefit_num: b.BenefitNum ?? null,
+      cov_cat_num: Number(b.CovCatNum) || 0,
+      plan_num: Number(b.PlanNum) || 0,
+      pat_plan_num: Number(b.PatPlanNum) || 0,
+    };
     if (type === "CoInsurance") {
       entry.percent = Number(b.Percent);
     } else if (type === "Deductible") {
@@ -2707,6 +2768,7 @@ async function syncODData(syncDate = null) {
     return;
   }
 
+  odCovCatCache = null; // refresh category map each sync
   const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
@@ -2956,6 +3018,7 @@ async function syncODData(syncDate = null) {
               plan_annual_max_cents,
               plan_deductible_cents,
               benefit_notes_present,
+              benefit_note: primarySub?.BenefitNotes?.trim() || null,
               operatory_name: operatoryMap[Number(apt.OperatoryNum)] ?? null,
               note: apt.Note ?? null,
               proc_descript: apt.ProcDescript ?? null,
@@ -3963,21 +4026,35 @@ function createTrayIcon() {
   return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
 }
 
-
 // ─── Service Startup ──────────────────────────────────────────────────────────
 // Ensure config directory exists
-const configDir = path.join(os.homedir(), 'AppData', 'Roaming', 'edifi-connect');
+const configDir = path.join(
+  os.homedir(),
+  "AppData",
+  "Roaming",
+  "edifi-connect",
+);
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
 loadConfig();
 
 if (!config.registered || !config.office_id) {
-  log('EDiFi Connect Bridge: not registered. Run the desktop tray app first to configure credentials, then start the service.');
+  log(
+    "EDiFi Connect Bridge: not registered. Run the desktop tray app first to configure credentials, then start the service.",
+  );
   process.exit(1);
 }
 
-log(`EDiFi Connect Bridge Service v2.3.58 starting — office: ${config.office_id}`);
+log(
+  `EDiFi Connect Bridge Service v2.3.58 starting — office: ${config.office_id}`,
+);
 connectTunnel();
 
-process.on('SIGTERM', () => { log('Service stopping (SIGTERM)'); process.exit(0); });
-process.on('SIGINT',  () => { log('Service stopping (SIGINT)');  process.exit(0); });
+process.on("SIGTERM", () => {
+  log("Service stopping (SIGTERM)");
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  log("Service stopping (SIGINT)");
+  process.exit(0);
+});
