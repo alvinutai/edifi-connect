@@ -25,10 +25,21 @@ const {
   writeOdBenefits,
   setLogger: setMysqlLogger,
   setManualMysqlConfig,
+  readOdConfig,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
 const { randomUUID, createHash } = require("crypto");
 const os = require("os");
+const { resolveBenefitCategory } = require("./lib/benefit-category");
+const {
+  sanitizeBenefitRow,
+  sanitizeCovcatRow,
+  summarizeBenefitRows,
+} = require("./lib/od-plan-probe");
+const {
+  sanitizeRestRow,
+  sanitizeMysqlRow,
+} = require("./lib/od-plan-nums");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -123,6 +134,8 @@ const AGENT_CAPABILITIES = [
   "GET_ECONNECTOR_LOG",
   "WRITE_HOSTS_ENTRY",
   "SYNC_FEE_SCHEDULE",
+  "READ_OD_PLAN_BENEFITS",
+  "READ_OD_PLAN_NUMS",
 ];
 
 function loadConfig() {
@@ -586,6 +599,12 @@ async function handleCommand(msg) {
         break;
       case "SYNC_FEE_SCHEDULE":
         await handleSyncFeeSchedule(command_id, payload);
+        break;
+      case "READ_OD_PLAN_BENEFITS":
+        await handleReadOdPlanBenefits(command_id, payload);
+        break;
+      case "READ_OD_PLAN_NUMS":
+        await handleReadOdPlanNums(command_id);
         break;
       default:
         sendCommandResult(
@@ -1360,6 +1379,237 @@ async function handleProbeOdBenefitSources(commandId) {
 
   sendCommandResult(commandId, "PROBE_OD_BENEFIT_SOURCES", "COMPLETED", {
     endpoints: results,
+  });
+}
+
+// ── READ_OD_PLAN_BENEFITS ─────────────────────────────────────────────────────
+// G-09I: Read-only evidence probe for OD benefit configuration.
+// Returns sanitized raw data from /covcat, /benefits?PlanNum, /insplans, and
+// optional endpoints. No PHI. No mapping. No inference. GET only.
+
+async function handleReadOdPlanBenefits(commandId, payload) {
+  if (!config.od_api_url) {
+    sendCommandResult(commandId, "READ_OD_PLAN_BENEFITS", "FAILED", {
+      error: "OD_API_URL_NOT_CONFIGURED",
+    });
+    return;
+  }
+
+  const planNum = payload && payload.plan_num;
+  if (!planNum) {
+    sendCommandResult(commandId, "READ_OD_PLAN_BENEFITS", "FAILED", {
+      error: "plan_num_required_in_payload",
+    });
+    return;
+  }
+
+  try {
+    const axios = require("axios");
+    const base = config.od_api_url.replace(/\/+$/, "");
+    const apiBase = base.endsWith("/api/v1") ? base : `${base}/api/v1`;
+    const headers = odAuthHeader();
+    const get = async (path) => {
+      const r = await axios.get(`${apiBase}${path}`, {
+        timeout: 10000,
+        headers,
+      });
+      return r.data;
+    };
+
+    // /covcat — pure plan config, no PHI
+    let covcatRaw = null;
+    try {
+      covcatRaw = await get("/covcat");
+    } catch (e) {
+      log(`[Probe] /covcat error: ${e.message}`);
+    }
+    const covcat = Array.isArray(covcatRaw)
+      ? covcatRaw.map(sanitizeCovcatRow)
+      : { error: "not_array_or_unavailable" };
+
+    // /benefits?PlanNum — all fields, sanitized
+    let benefitsRaw = null;
+    try {
+      benefitsRaw = await get(`/benefits?PlanNum=${planNum}`);
+    } catch (e) {
+      log(`[Probe] /benefits error: ${e.message}`);
+    }
+    const sanitizedBenefits = Array.isArray(benefitsRaw)
+      ? benefitsRaw.map((row, i) => sanitizeBenefitRow(row, i))
+      : [];
+    const summary = summarizeBenefitRows(sanitizedBenefits);
+
+    // /insplans/{PlanNum} — field names only (no values — some may be patient-level)
+    let insplanKeys = [];
+    try {
+      const ip = await get(`/insplans/${planNum}`);
+      insplanKeys = ip && typeof ip === "object" ? Object.keys(ip) : [];
+    } catch (e) {
+      log(`[Probe] /insplans error: ${e.message}`);
+    }
+
+    // Optional: /insbenefits — availability + field schema only
+    let insbenefits = { available: false };
+    try {
+      const ib = await get(`/insbenefits?PlanNum=${planNum}&Limit=3`);
+      insbenefits = {
+        available: true,
+        row_count: Array.isArray(ib) ? ib.length : 0,
+        first_row_keys: Array.isArray(ib) && ib[0] ? Object.keys(ib[0]) : [],
+      };
+    } catch (e) {
+      insbenefits = {
+        available: false,
+        http_status: e.response?.status ?? null,
+      };
+    }
+
+    // Optional: /codegroups — code group definitions (CDT code bundles)
+    let codegroups = { available: false };
+    try {
+      const cg = await get("/codegroups");
+      codegroups = {
+        available: true,
+        count: Array.isArray(cg) ? cg.length : 0,
+        rows: Array.isArray(cg) ? cg : [], // no PHI in code group defs
+      };
+    } catch (e) {
+      codegroups = {
+        available: false,
+        http_status: e.response?.status ?? null,
+      };
+    }
+
+    sendCommandResult(commandId, "READ_OD_PLAN_BENEFITS", "COMPLETED", {
+      plan_num_probed: "P001",
+      covcat,
+      benefits_summary: summary,
+      insplan_field_names: insplanKeys,
+      insbenefits,
+      codegroups,
+    });
+  } catch (e) {
+    sendCommandResult(commandId, "READ_OD_PLAN_BENEFITS", "FAILED", {
+      error: String(e.message ?? "unknown").slice(0, 120),
+    });
+  }
+}
+
+// ── READ_OD_PLAN_NUMS ─────────────────────────────────────────────────────────
+// G-09M: List all insurance plans directly from Open Dental.
+// Tries REST GET /insplans first; falls to MySQL insplan + carrier on any failure.
+// No payload required. No patient/subscriber data returned.
+// Identical to bridge.js handler — parity required.
+
+async function handleReadOdPlanNums(commandId) {
+  let plans = [];
+  let source = "NONE";
+  let restAvailable = false;
+  let mysqlAvailable = false;
+
+  // REST path — skipped entirely if od_api_url is not configured
+  if (config.od_api_url) {
+    try {
+      const axios = require("axios");
+      const base = config.od_api_url.replace(/\/+$/, "");
+      const apiBase = base.endsWith("/api/v1") ? base : `${base}/api/v1`;
+      const r = await axios.get(`${apiBase}/insplans`, {
+        timeout: 10000,
+        headers: odAuthHeader(),
+      });
+      if (Array.isArray(r.data)) {
+        restAvailable = true;
+        plans = r.data
+          .slice(0, 100)
+          .map((row, i) => sanitizeRestRow(row, i))
+          .filter(Boolean);
+        source = "REST_INSPLANS";
+      }
+    } catch (e) {
+      log(
+        `[READ_OD_PLAN_NUMS] REST /insplans failed: ${String(e.message ?? "unknown").slice(0, 80)}`,
+      );
+    }
+  }
+
+  // MySQL fallback — attempt whenever REST did not succeed
+  if (source === "NONE") {
+    let cfg = null;
+    if (
+      config.od_mysql &&
+      config.od_mysql.host &&
+      config.od_mysql.user &&
+      config.od_mysql.password
+    ) {
+      cfg = config.od_mysql;
+    } else {
+      try {
+        cfg = await readOdConfig();
+      } catch (e) {
+        log(
+          `[READ_OD_PLAN_NUMS] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
+      }
+    }
+    if (cfg && cfg.host && cfg.user && cfg.password) {
+      try {
+        mysqlAvailable = true;
+        const mysql = require("mysql2/promise");
+        const conn = await mysql.createConnection({
+          host: cfg.host,
+          port: cfg.port || 3306,
+          database: cfg.database,
+          user: cfg.user,
+          password: cfg.password,
+          connectTimeout: 8000,
+        });
+        try {
+          const [rows] = await conn.query(`
+            SELECT
+              i.PlanNum,
+              c.CarrierName,
+              i.GroupName,
+              i.FeeSched,
+              i.PlanType,
+              CASE WHEN i.PlanNote IS NULL OR i.PlanNote = '' THEN 0 ELSE 1 END AS PlanNotePresent,
+              CHAR_LENGTH(COALESCE(i.PlanNote, '')) AS PlanNoteLength
+            FROM insplan i
+            LEFT JOIN carrier c ON c.CarrierNum = i.CarrierNum
+            ORDER BY i.PlanNum ASC
+            LIMIT 100
+          `);
+          plans = rows
+            .map((row, i) => sanitizeMysqlRow(row, i))
+            .filter(Boolean);
+          source = "MYSQL_INSPLAN";
+        } finally {
+          await conn.end().catch(() => {});
+        }
+      } catch (e) {
+        log(
+          `[READ_OD_PLAN_NUMS] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
+        mysqlAvailable = false;
+      }
+    }
+  }
+
+  if (source === "NONE") {
+    sendCommandResult(commandId, "READ_OD_PLAN_NUMS", "FAILED", {
+      error: "NO_OD_SOURCE_AVAILABLE",
+      rest_attempted: !!config.od_api_url,
+      mysql_attempted: true,
+    });
+    return;
+  }
+
+  sendCommandResult(commandId, "READ_OD_PLAN_NUMS", "COMPLETED", {
+    command: "READ_OD_PLAN_NUMS",
+    source,
+    rest_available: restAvailable,
+    mysql_available: mysqlAvailable,
+    total_returned: plans.length,
+    plans,
   });
 }
 
@@ -2667,11 +2917,25 @@ async function getOdCovCats() {
     if (Array.isArray(cats) && cats.length > 0) {
       const map = {};
       for (const c of cats) {
-        // Map EbenefitCat to category code; fall back to description-based detection
+        // Use EbenefitCat enum first — OD standard numeric code, reliable regardless of description text
+        // OD EbenefitCat: 0=None,1=General,2=Preventive,3=Diagnostic,4=Restorative,5=Endodontics,
+        //                 6=Periodontics,7=OralSurgery,8=Prosth,9=Crowns,10=Accident,11=Ortho
+        const eben = Number(c.EbenefitCat ?? 0);
         const desc = (c.Description || "").toUpperCase();
         let cat = "GENERAL";
-        // Exact OD names take priority over keyword matching
-        if (desc === "DIAGNOSTIC" || desc.includes("DIAGN")) cat = "DIAGNOSTIC";
+        if (eben === 2) cat = "PREVENTIVE";
+        else if (eben === 3) cat = "DIAGNOSTIC";
+        else if (eben === 4) cat = "BASIC";
+        else if (eben === 5) cat = "ENDODONTIC";
+        else if (eben === 6) cat = "PERIODONTIC";
+        else if (eben === 7) cat = "ORAL_SURGERY";
+        else if (eben === 8) cat = "PROSTHODONTIA";
+        else if (eben === 9) cat = "CROWNS";
+        else if (eben === 11) cat = "ORTHODONTIC";
+        else if (eben === 12) cat = "IMPLANT";
+        // Fall back to description matching only for eben=0,1 (None/General) or unmapped values
+        else if (desc === "DIAGNOSTIC" || desc.includes("DIAGN"))
+          cat = "DIAGNOSTIC";
         else if (
           desc === "X-RAY" ||
           desc.includes("X-RAY") ||
@@ -2834,14 +3098,28 @@ function mapOdApiBenefits(rawBenefits) {
       dropped_reasons[key] = (dropped_reasons[key] || 0) + 1;
       continue;
     }
-    const category = catMap[b.CovCatNum] || "GENERAL";
+    const catFromCovCat = catMap[b.CovCatNum] || "GENERAL";
+    const { category, categorySource } = resolveBenefitCategory(
+      catFromCovCat,
+      b.EbenefitCat,
+    );
     const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
+    // Diagnostic: log first 2 rows per sync — keys and category metadata only, no PHI
+    if (results.length < 2) {
+      log(
+        `[BenefitShape] row=${results.length} keys=[${Object.keys(b).join(",")}] ` +
+          `CovCatNum=${b.CovCatNum} EbenefitCat=${b.EbenefitCat ?? "(absent)"} ` +
+          `pct=${b.Percent} → category=${category} src=${categorySource}`,
+      );
+    }
     const entry = {
       type,
       category,
       coverage_level,
       benefit_num: b.BenefitNum ?? null,
       cov_cat_num: Number(b.CovCatNum) || 0,
+      ebenefitcat: Number(b.EbenefitCat ?? 0) || null,
+      category_source: categorySource,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,
     };
