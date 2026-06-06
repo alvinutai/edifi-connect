@@ -39,6 +39,9 @@ const {
 const {
   sanitizeRestRow,
   sanitizeMysqlRow,
+  sanitizeRestRowWithCarrier,
+  sanitizeMysqlRowFiltered,
+  sanitizeFilter,
 } = require("./lib/od-plan-nums");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -604,7 +607,7 @@ async function handleCommand(msg) {
         await handleReadOdPlanBenefits(command_id, payload);
         break;
       case "READ_OD_PLAN_NUMS":
-        await handleReadOdPlanNums(command_id);
+        await handleReadOdPlanNums(command_id, payload);
         break;
       default:
         sendCommandResult(
@@ -1501,7 +1504,14 @@ async function handleReadOdPlanBenefits(commandId, payload) {
 // No payload required. No patient/subscriber data returned.
 // Identical to bridge.js handler — parity required.
 
-async function handleReadOdPlanNums(commandId) {
+async function handleReadOdPlanNums(commandId, payload) {
+  const rawFilter =
+    payload && typeof payload.carrier_filter === "string"
+      ? payload.carrier_filter
+      : null;
+  const activeFilter = rawFilter !== null ? sanitizeFilter(rawFilter) : null;
+  const useFilter = activeFilter !== null && activeFilter.length > 0;
+
   let plans = [];
   let source = "NONE";
   let restAvailable = false;
@@ -1519,10 +1529,87 @@ async function handleReadOdPlanNums(commandId) {
       });
       if (Array.isArray(r.data)) {
         restAvailable = true;
-        plans = r.data
-          .slice(0, 100)
-          .map((row, i) => sanitizeRestRow(row, i))
-          .filter(Boolean);
+
+        if (useFilter) {
+          // Collect unique CarrierNums from full result, capped at 75
+          const carrierNumSet = new Set();
+          for (const row of r.data) {
+            const num = Number(row.CarrierNum);
+            if (Number.isInteger(num) && num > 0) {
+              carrierNumSet.add(num);
+              if (carrierNumSet.size >= 75) break;
+            }
+          }
+
+          // Resolve carrier names — inline axios, 2000ms timeout per call, batch 10
+          const carrierNums = Array.from(carrierNumSet);
+          const carrierMap = new Map();
+          const authHeaders = odAuthHeader();
+          const BATCH_SIZE = 10;
+          for (let i = 0; i < carrierNums.length; i += BATCH_SIZE) {
+            const batch = carrierNums.slice(i, i + BATCH_SIZE);
+            const settled = await Promise.allSettled(
+              batch.map((num) =>
+                axios
+                  .get(`${apiBase}/carriers/${num}`, {
+                    timeout: 2000,
+                    headers: authHeaders,
+                  })
+                  .then((resp) => ({
+                    num,
+                    name:
+                      resp.data && typeof resp.data.CarrierName === "string"
+                        ? resp.data.CarrierName
+                        : null,
+                  }))
+                  .catch(() => ({ num, name: null })),
+              ),
+            );
+            for (const result of settled) {
+              if (result.status === "fulfilled" && result.value) {
+                carrierMap.set(result.value.num, result.value.name);
+              }
+            }
+          }
+
+          // Iterate full result, filter by carrier_filter, cap at 100 post-filter
+          let planIndex = 0;
+          const matched = [];
+          for (const row of r.data) {
+            const planNum = Number(row.PlanNum);
+            if (!Number.isInteger(planNum) || planNum <= 0) continue;
+            const carrierNum = Number(row.CarrierNum);
+            const resolvedName =
+              Number.isInteger(carrierNum) && carrierNum > 0
+                ? carrierMap.get(carrierNum) ?? null
+                : null;
+            const nameMatch =
+              resolvedName !== null &&
+              resolvedName.toLowerCase().includes(activeFilter);
+            const groupMatch =
+              typeof row.GroupName === "string" &&
+              row.GroupName.toLowerCase().includes(activeFilter);
+            if (!nameMatch && !groupMatch) continue;
+            const matchSource = nameMatch ? "carrier_name" : "group_name";
+            const sanitized = sanitizeRestRowWithCarrier(
+              row,
+              planIndex,
+              resolvedName,
+              matchSource,
+            );
+            if (sanitized) {
+              matched.push(sanitized);
+              planIndex++;
+            }
+            if (matched.length >= 100) break;
+          }
+          plans = matched;
+        } else {
+          plans = r.data
+            .slice(0, 100)
+            .map((row, i) => sanitizeRestRow(row, i))
+            .filter(Boolean);
+        }
         source = "REST_INSPLANS";
       }
     } catch (e) {
@@ -1564,23 +1651,78 @@ async function handleReadOdPlanNums(commandId) {
           connectTimeout: 8000,
         });
         try {
-          const [rows] = await conn.query(`
-            SELECT
-              i.PlanNum,
-              c.CarrierName,
-              i.GroupName,
-              i.FeeSched,
-              i.PlanType,
-              CASE WHEN i.PlanNote IS NULL OR i.PlanNote = '' THEN 0 ELSE 1 END AS PlanNotePresent,
-              CHAR_LENGTH(COALESCE(i.PlanNote, '')) AS PlanNoteLength
-            FROM insplan i
-            LEFT JOIN carrier c ON c.CarrierNum = i.CarrierNum
-            ORDER BY i.PlanNum ASC
-            LIMIT 100
-          `);
-          plans = rows
-            .map((row, i) => sanitizeMysqlRow(row, i))
-            .filter(Boolean);
+          let rows;
+          if (useFilter) {
+            const filterParam = `%${activeFilter}%`;
+            const [r2] = await conn.query(
+              `
+              SELECT
+                i.PlanNum,
+                c.CarrierName,
+                i.GroupName,
+                i.FeeSched,
+                i.PlanType,
+                CASE WHEN i.PlanNote IS NULL OR i.PlanNote = '' THEN 0 ELSE 1 END AS PlanNotePresent,
+                CHAR_LENGTH(COALESCE(i.PlanNote, '')) AS PlanNoteLength
+              FROM insplan i
+              LEFT JOIN carrier c ON c.CarrierNum = i.CarrierNum
+              WHERE LOWER(c.CarrierName) LIKE ? OR LOWER(i.GroupName) LIKE ?
+              ORDER BY i.PlanNum ASC
+              LIMIT 1000
+            `,
+              [filterParam, filterParam],
+            );
+            rows = r2;
+          } else {
+            const [r2] = await conn.query(`
+              SELECT
+                i.PlanNum,
+                c.CarrierName,
+                i.GroupName,
+                i.FeeSched,
+                i.PlanType,
+                CASE WHEN i.PlanNote IS NULL OR i.PlanNote = '' THEN 0 ELSE 1 END AS PlanNotePresent,
+                CHAR_LENGTH(COALESCE(i.PlanNote, '')) AS PlanNoteLength
+              FROM insplan i
+              LEFT JOIN carrier c ON c.CarrierNum = i.CarrierNum
+              ORDER BY i.PlanNum ASC
+              LIMIT 100
+            `);
+            rows = r2;
+          }
+
+          if (useFilter) {
+            let planIndex = 0;
+            const matched = [];
+            for (const row of rows) {
+              const nameMatch =
+                row.CarrierName &&
+                row.CarrierName.toLowerCase().includes(activeFilter);
+              const groupMatch =
+                row.GroupName &&
+                row.GroupName.toLowerCase().includes(activeFilter);
+              const matchSource = nameMatch
+                ? "carrier_name"
+                : groupMatch
+                  ? "group_name"
+                  : null;
+              const sanitized = sanitizeMysqlRowFiltered(
+                row,
+                planIndex,
+                matchSource,
+              );
+              if (sanitized) {
+                matched.push(sanitized);
+                planIndex++;
+              }
+              if (matched.length >= 100) break;
+            }
+            plans = matched;
+          } else {
+            plans = rows
+              .map((row, i) => sanitizeMysqlRow(row, i))
+              .filter(Boolean);
+          }
           source = "MYSQL_INSPLAN";
         } finally {
           await conn.end().catch(() => {});
@@ -1603,14 +1745,18 @@ async function handleReadOdPlanNums(commandId) {
     return;
   }
 
-  sendCommandResult(commandId, "READ_OD_PLAN_NUMS", "COMPLETED", {
+  const result = {
     command: "READ_OD_PLAN_NUMS",
     source,
     rest_available: restAvailable,
     mysql_available: mysqlAvailable,
     total_returned: plans.length,
     plans,
-  });
+  };
+  if (useFilter) {
+    result.carrier_filter_applied = activeFilter;
+  }
+  sendCommandResult(commandId, "READ_OD_PLAN_NUMS", "COMPLETED", result);
 }
 
 // ── START_OD_ECONNECTOR ───────────────────────────────────────────────────────

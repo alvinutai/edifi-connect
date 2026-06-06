@@ -1,6 +1,6 @@
 {
   "name": "edifi-connect-service",
-  "version": "2.3.66",
+  "version": "2.3.67",
   "description": "EDiFi Connect Bridge — headless Windows Service",
   "main": "bridge.js",
   "scripts": {
