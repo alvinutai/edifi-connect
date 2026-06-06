@@ -35,6 +35,9 @@ const {
   sanitizeRestRowWithCarrier,
   sanitizeMysqlRowFiltered,
   sanitizeFilter,
+  sanitizePatNum,
+  sanitizePatientPlanRestRow,
+  sanitizePatientPlanMysqlRow,
 } = require("../electron-app/lib/od-plan-nums");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -144,6 +147,7 @@ const AGENT_CAPABILITIES = [
   "SYNC_FEE_SCHEDULE",
   "READ_OD_PLAN_BENEFITS",
   "READ_OD_PLAN_NUMS",
+  "READ_OD_PATIENT_PLAN",
 ];
 
 function loadConfig() {
@@ -543,6 +547,9 @@ async function handleCommand(msg) {
         break;
       case "READ_OD_PLAN_NUMS":
         await handleReadOdPlanNums(command_id, payload);
+        break;
+      case "READ_OD_PATIENT_PLAN":
+        await handleReadOdPatientPlan(command_id, payload);
         break;
       default:
         sendCommandResult(
@@ -1684,6 +1691,238 @@ async function handleReadOdPlanNums(commandId, payload) {
     result.carrier_filter_applied = activeFilter;
   }
   sendCommandResult(commandId, "READ_OD_PLAN_NUMS", "COMPLETED", result);
+}
+
+// ── READ_OD_PATIENT_PLAN ──────────────────────────────────────────────────────
+// G-09V: Resolve active insurance plans for a specific patient via OD.
+// Input: pat_num (positive integer — read from OD by Tessina, used internally only).
+// REST chain: /patplans?PatNum → /inssubs/{InsSubNum} → /insplans/{PlanNum} → /carriers/{CarrierNum}
+// MySQL fallback: patplan JOIN inssub JOIN insplan JOIN carrier WHERE PatNum=? AND DateTerm active.
+// pat_num never appears in logs, result, or stored payload_json.
+// Identical to electron-app/main.js handler — parity required.
+
+async function handleReadOdPatientPlan(commandId, payload) {
+  let patNum;
+  try {
+    patNum = sanitizePatNum(payload && payload.pat_num);
+  } catch (_) {
+    sendCommandResult(commandId, "READ_OD_PATIENT_PLAN", "FAILED", {
+      error: "INVALID_PAT_NUM",
+    });
+    return;
+  }
+
+  let plans = [];
+  let source = "NONE";
+  let restAvailable = false;
+  let mysqlAvailable = false;
+
+  if (config.od_api_url) {
+    try {
+      const axios = require("axios");
+      const base = config.od_api_url.replace(/\/+$/, "");
+      const apiBase = base.endsWith("/api/v1") ? base : `${base}/api/v1`;
+      const authHeaders = odAuthHeader();
+
+      let patPlanRows;
+      try {
+        const resp = await axios.get(`${apiBase}/patplans?PatNum=${patNum}`, {
+          timeout: 6000,
+          headers: authHeaders,
+        });
+        patPlanRows = Array.isArray(resp.data) ? resp.data : [];
+      } catch (e) {
+        log(`[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        throw e;
+      }
+
+      restAvailable = true;
+      const planEntries = [];
+      const seenPlanNums = new Set();
+
+      for (const pp of patPlanRows.slice(0, 20)) {
+        const insSubNum = Number(pp.InsSubNum);
+        if (!Number.isInteger(insSubNum) || insSubNum <= 0) continue;
+
+        let sub;
+        try {
+          const subResp = await axios.get(`${apiBase}/inssubs/${insSubNum}`, {
+            timeout: 6000,
+            headers: authHeaders,
+          });
+          sub = subResp.data;
+        } catch (e) {
+          log(`[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          continue;
+        }
+
+        if (!sub) continue;
+        if (sub.DateTerm && new Date(sub.DateTerm) <= new Date()) continue;
+
+        const planNum = Number(sub.PlanNum);
+        if (!Number.isInteger(planNum) || planNum <= 0) continue;
+        if (seenPlanNums.has(planNum)) continue;
+        seenPlanNums.add(planNum);
+
+        let insplan;
+        try {
+          const planResp = await axios.get(`${apiBase}/insplans/${planNum}`, {
+            timeout: 6000,
+            headers: authHeaders,
+          });
+          insplan = planResp.data;
+        } catch (e) {
+          log(`[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          continue;
+        }
+
+        if (!insplan) continue;
+
+        const ordinal = Number.isInteger(Number(pp.Ordinal)) ? Number(pp.Ordinal) : null;
+        const carrierNum = Number(insplan.CarrierNum);
+        planEntries.push({
+          ordinal,
+          planNum,
+          insplan,
+          carrierNum: Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
+        });
+        if (planEntries.length >= 20) break;
+      }
+
+      const uniqueCarrierNums = [
+        ...new Set(planEntries.map((e) => e.carrierNum).filter(Boolean)),
+      ].slice(0, 10);
+      const carrierMap = new Map();
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < uniqueCarrierNums.length; i += BATCH_SIZE) {
+        const batch = uniqueCarrierNums.slice(i, i + BATCH_SIZE);
+        const settled = await Promise.allSettled(
+          batch.map((num) =>
+            axios
+              .get(`${apiBase}/carriers/${num}`, {
+                timeout: 2000,
+                headers: authHeaders,
+              })
+              .then((r) => ({
+                num,
+                name:
+                  r.data && typeof r.data.CarrierName === "string"
+                    ? r.data.CarrierName
+                    : null,
+              }))
+              .catch((e) => {
+                log(`[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+                return { num, name: null };
+              }),
+          ),
+        );
+        for (const r of settled) {
+          if (r.status === "fulfilled" && r.value)
+            carrierMap.set(r.value.num, r.value.name);
+        }
+      }
+
+      plans = planEntries
+        .map((entry, i) => {
+          const resolvedName = entry.carrierNum
+            ? carrierMap.get(entry.carrierNum) ?? null
+            : null;
+          return sanitizePatientPlanRestRow(
+            entry.insplan,
+            i,
+            entry.ordinal,
+            entry.planNum,
+            resolvedName,
+          );
+        })
+        .filter(Boolean);
+
+      source = "REST_PATPLAN";
+    } catch (_) {
+      // PATPLAN_LOOKUP_FAILED already logged above; fall through to MySQL
+    }
+  }
+
+  if (source === "NONE") {
+    let cfg = null;
+    if (
+      config.od_mysql &&
+      config.od_mysql.host &&
+      config.od_mysql.user &&
+      config.od_mysql.password
+    ) {
+      cfg = config.od_mysql;
+    } else {
+      try {
+        cfg = await readOdConfig();
+      } catch (e) {
+        log(`[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`);
+      }
+    }
+    if (cfg && cfg.host && cfg.user && cfg.password) {
+      try {
+        mysqlAvailable = true;
+        const mysql = require("mysql2/promise");
+        const conn = await mysql.createConnection({
+          host: cfg.host,
+          port: cfg.port || 3306,
+          database: cfg.database,
+          user: cfg.user,
+          password: cfg.password,
+          connectTimeout: 8000,
+        });
+        try {
+          const [rows] = await conn.query(
+            `
+            SELECT pp.Ordinal,
+                   i.PlanNum,
+                   i.GroupName,
+                   i.PlanType,
+                   i.FeeSched,
+                   CASE WHEN i.PlanNote IS NULL OR i.PlanNote = ''
+                        THEN 0 ELSE 1 END AS PlanNotePresent,
+                   CHAR_LENGTH(COALESCE(i.PlanNote, '')) AS PlanNoteLength,
+                   c.CarrierName
+            FROM patplan pp
+            JOIN inssub isub ON isub.InsSubNum = pp.InsSubNum
+            JOIN insplan i    ON i.PlanNum = isub.PlanNum
+            LEFT JOIN carrier c ON c.CarrierNum = i.CarrierNum
+            WHERE pp.PatNum = ?
+              AND (isub.DateTerm IS NULL OR isub.DateTerm > CURDATE())
+            ORDER BY pp.Ordinal ASC
+            LIMIT 20
+            `,
+            [patNum],
+          );
+          plans = rows.map((row, i) => sanitizePatientPlanMysqlRow(row, i)).filter(Boolean);
+          source = "MYSQL_PATPLAN";
+        } finally {
+          await conn.end().catch(() => {});
+        }
+      } catch (e) {
+        log(`[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        mysqlAvailable = false;
+      }
+    }
+  }
+
+  if (source === "NONE") {
+    sendCommandResult(commandId, "READ_OD_PATIENT_PLAN", "FAILED", {
+      error: "NO_OD_SOURCE_AVAILABLE",
+      rest_attempted: !!config.od_api_url,
+      mysql_attempted: true,
+    });
+    return;
+  }
+
+  sendCommandResult(commandId, "READ_OD_PATIENT_PLAN", "COMPLETED", {
+    command: "READ_OD_PATIENT_PLAN",
+    source,
+    rest_available: restAvailable,
+    mysql_available: mysqlAvailable,
+    total_returned: plans.length,
+    plans,
+  });
 }
 
 // ── START_OD_ECONNECTOR ───────────────────────────────────────────────────────

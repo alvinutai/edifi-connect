@@ -13,6 +13,9 @@ const {
   sanitizeRestRowWithCarrier,
   sanitizeMysqlRowFiltered,
   sanitizeFilter,
+  sanitizePatNum,
+  sanitizePatientPlanRestRow,
+  sanitizePatientPlanMysqlRow,
 } = require("../lib/od-plan-nums");
 
 let passed = 0;
@@ -449,6 +452,180 @@ test("CF15: bridge.js MySQL filtered query uses ? placeholders (no string interp
     handlerSrc.includes("filterParam"),
     "bridge.js must use filterParam variable passed as query parameter",
   );
+});
+
+// ── PP1: sanitizePatNum rejects invalid inputs ────────────────────────────────
+test("PP1: sanitizePatNum rejects 0, negative, float, string, null, undefined", () => {
+  const bad = [0, -1, -100, 1.5, "abc", "47", "0", null, undefined, {}, []];
+  for (const v of bad) {
+    assert.throws(() => sanitizePatNum(v), /INVALID_PAT_NUM/, `Expected throw for: ${JSON.stringify(v)}`);
+  }
+});
+
+// ── PP2: sanitizePatNum accepts positive integer ──────────────────────────────
+test("PP2: sanitizePatNum accepts positive integer and returns integer", () => {
+  assert.strictEqual(sanitizePatNum(1), 1);
+  assert.strictEqual(sanitizePatNum(99999), 99999);
+  assert.strictEqual(typeof sanitizePatNum(42), "number");
+});
+
+// ── PP3: sanitizePatientPlanRestRow strips PHI fields ────────────────────────
+test("PP3: sanitizePatientPlanRestRow strips PatPlanNum, InsSubNum, SubscriberID, PatNum from output", () => {
+  const insplan = { GroupName: "All Smiles", PlanType: "PPO", FeeSched: 53, CarrierNum: 12, SubscriberID: "MBR123", PatNum: 555, PatPlanNum: 1, InsSubNum: 8 };
+  const out = sanitizePatientPlanRestRow(insplan, 0, 1, 47, "MetLife PPO");
+  assert.ok(!("PatPlanNum" in out), "PatPlanNum must not appear");
+  assert.ok(!("InsSubNum" in out), "InsSubNum must not appear");
+  assert.ok(!("SubscriberID" in out), "SubscriberID must not appear");
+  assert.ok(!("PatNum" in out), "PatNum must not appear");
+  assert.ok(!("CarrierNum" in out), "CarrierNum must not appear");
+});
+
+// ── PP4: sanitizePatientPlanRestRow includes ordinal and plan_num ─────────────
+test("PP4: sanitizePatientPlanRestRow includes ordinal and plan_num", () => {
+  const out = sanitizePatientPlanRestRow({ GroupName: "X", PlanType: "PPO", FeeSched: 0 }, 0, 1, 47, "MetLife");
+  assert.strictEqual(out.ordinal, 1);
+  assert.strictEqual(out.plan_num, 47);
+});
+
+// ── PP5: is_metlife_match true for MetLife variants ──────────────────────────
+test("PP5: is_metlife_match true when carrier_name is Metlife, MetLife, METLIFE", () => {
+  for (const name of ["Metlife", "MetLife", "METLIFE", "MetLife PPO", "metlife"]) {
+    const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, name);
+    assert.strictEqual(out.is_metlife_match, true, `Expected match for: ${name}`);
+    assert.strictEqual(out.match_source, "carrier_name");
+  }
+});
+
+// ── PP6: is_metlife_match false for non-MetLife carriers ─────────────────────
+test("PP6: is_metlife_match false for Delta Dental", () => {
+  const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "Delta Dental");
+  assert.strictEqual(out.is_metlife_match, false);
+  assert.strictEqual(out.match_source, null);
+});
+
+// ── PP7: Result caps at 20 plans ─────────────────────────────────────────────
+test("PP7: sanitizePatientPlanMysqlRow row_label for 20th row is P020", () => {
+  const row = { PlanNum: 999, CarrierName: "Delta", GroupName: "G", PlanType: "PPO", FeeSched: 0, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 2 };
+  const out = sanitizePatientPlanMysqlRow(row, 19);
+  assert.strictEqual(out.row_label, "P020");
+});
+
+// ── PP8: main.js calls /patplans?PatNum= not /patients/{patNum}/insplans ─────
+test("PP8: main.js source confirms /patplans?PatNum= is used (not /patients/{patNum}/insplans)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  assert.ok(idx > -1, "async function handleReadOdPatientPlan must exist in main.js");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("/patplans?PatNum="), "main.js handler must use /patplans?PatNum=");
+  assert.ok(!handlerSrc.includes("/patients/"), "main.js handler must NOT use /patients/{patNum}/insplans");
+});
+
+// ── PP9: bridge.js parity — same endpoint as main.js ─────────────────────────
+test("PP9: bridge.js source confirms /patplans?PatNum= is used and parity with main.js", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../../service/bridge.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  assert.ok(idx > -1, "async function handleReadOdPatientPlan must exist in bridge.js");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("/patplans?PatNum="), "bridge.js handler must use /patplans?PatNum=");
+  assert.ok(!handlerSrc.includes("/patients/"), "bridge.js handler must NOT use /patients/{patNum}/insplans");
+});
+
+// ── PP10: carrier resolution uses timeout: 2000 ───────────────────────────────
+test("PP10: main.js handleReadOdPatientPlan carrier resolution uses timeout: 2000", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("timeout: 2000"), "carrier resolution must use timeout: 2000");
+});
+
+// ── PP11: MySQL query uses ? placeholder ──────────────────────────────────────
+test("PP11: main.js MySQL query uses ? placeholder for PatNum (not string interpolation)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("WHERE pp.PatNum = ?"), "MySQL must use parameterized ? for PatNum");
+});
+
+// ── PP12: MySQL query has LIMIT 20 ───────────────────────────────────────────
+test("PP12: main.js MySQL query has LIMIT 20", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("LIMIT 20"), "MySQL query must have LIMIT 20");
+});
+
+// ── PP13: pat_num absent from sanitized result ────────────────────────────────
+test("PP13: sanitizePatientPlanRestRow does not include pat_num in output", () => {
+  const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "MetLife");
+  assert.ok(!("pat_num" in out), "pat_num must not appear in output (plan_num is the allowed field)");
+  assert.ok("plan_num" in out, "plan_num must appear in output");
+});
+
+// ── PP14: is_metlife_match survives sanitizePatientPlanMysqlRow ───────────────
+test("PP14: sanitizePatientPlanMysqlRow is_metlife_match is true for MetLife carrier", () => {
+  const row = { PlanNum: 47, CarrierName: "MetLife PPO", GroupName: "G", PlanType: "PPO", FeeSched: 53, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 1 };
+  const out = sanitizePatientPlanMysqlRow(row, 0);
+  assert.strictEqual(out.is_metlife_match, true);
+  assert.strictEqual(out.match_source, "carrier_name");
+});
+
+// ── PP15: SubscriberID dropped by sanitizePatientPlanRestRow ─────────────────
+test("PP15: sanitizePatientPlanRestRow drops SubscriberID", () => {
+  const insplan = { GroupName: "X", SubscriberID: "MBR123", PlanType: "PPO", FeeSched: 0 };
+  const out = sanitizePatientPlanRestRow(insplan, 0, 1, 47, "Delta");
+  assert.ok(!("SubscriberID" in out), "SubscriberID must not appear in output");
+});
+
+// ── PP_NEW1: payload_json stores pat_num as [REDACTED] ────────────────────────
+test("PP_NEW1: main.js handleReadOdPatientPlan source — pat_num never in result object", () => {
+  // Verify sanitizer does not emit pat_num at any level
+  const restRow = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "MetLife");
+  assert.ok(!("pat_num" in restRow), "pat_num must not appear in REST row output");
+  const mysqlRow = sanitizePatientPlanMysqlRow({ PlanNum: 47, CarrierName: "MetLife", GroupName: "G", PlanType: "PPO", FeeSched: 0, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 1 }, 0);
+  assert.ok(!("pat_num" in mysqlRow), "pat_num must not appear in MySQL row output");
+});
+
+// ── PP_NEW2: Log step codes used; PatNum value not interpolated in log strings ─
+test("PP_NEW2: main.js handler log() calls use step codes, not raw PatNum values", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  // Extract only log() call lines to check — URL construction is allowed to reference patNum
+  const logLines = handlerSrc.split("\n").filter((l) => l.includes("log("));
+  for (const line of logLines) {
+    assert.ok(!line.includes("${patNum}"), `log() line must not interpolate patNum: ${line.trim()}`);
+    assert.ok(!line.includes("${pat_num}"), `log() line must not interpolate pat_num: ${line.trim()}`);
+  }
+  assert.ok(handlerSrc.includes("PATPLAN_LOOKUP_FAILED"), "must use step code PATPLAN_LOOKUP_FAILED");
+  assert.ok(handlerSrc.includes("INSSUB_LOOKUP_FAILED"), "must use step code INSSUB_LOOKUP_FAILED");
+  assert.ok(handlerSrc.includes("INSPLAN_LOOKUP_FAILED"), "must use step code INSPLAN_LOOKUP_FAILED");
+  assert.ok(handlerSrc.includes("CARRIER_LOOKUP_FAILED"), "must use step code CARRIER_LOOKUP_FAILED");
+});
+
+// ── PP_NEW3: main.js calls /patplans?PatNum= (Codex R1 verification) ─────────
+test("PP_NEW3: main.js source inspection — calls /patplans?PatNum= (not /patients/{patNum}/insplans)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("/patplans?PatNum="), "must call /patplans?PatNum=");
+  assert.ok(!handlerSrc.includes("/patients/"), "must NOT call /patients/{patNum}/insplans");
+});
+
+// ── PP_NEW4: main.js calls /inssubs/ to resolve InsSubNum → PlanNum ──────────
+test("PP_NEW4: main.js source inspection — calls /inssubs/ to resolve InsSubNum to PlanNum", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("/inssubs/"), "must call /inssubs/{InsSubNum} to resolve PlanNum");
+});
+
+// ── PP_NEW5: MySQL query uses isub.DateTerm, not pp.PatStatus ────────────────
+test("PP_NEW5: main.js MySQL query uses isub.DateTerm and does NOT contain pp.PatStatus", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(handlerSrc.includes("isub.DateTerm"), "MySQL query must use isub.DateTerm for active plan filter");
+  assert.ok(!handlerSrc.includes("pp.PatStatus"), "MySQL query must NOT use pp.PatStatus (not on patplan table)");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

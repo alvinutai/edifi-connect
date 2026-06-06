@@ -103,10 +103,72 @@ function sanitizeMysqlRowFiltered(row, index, matchSource) {
   };
 }
 
+// Validates PatNum payload field — must be a positive integer.
+// Throws with code INVALID_PAT_NUM on any invalid input.
+function sanitizePatNum(val) {
+  if (typeof val !== "number" || !Number.isInteger(val) || val <= 0) {
+    const err = new Error("INVALID_PAT_NUM");
+    err.code = "INVALID_PAT_NUM";
+    throw err;
+  }
+  return val;
+}
+
+// Builds a sanitized row for READ_OD_PATIENT_PLAN from OD REST chain.
+// insplanRow: response from GET /insplans/{PlanNum}
+// resolvedCarrierName: resolved from GET /carriers/{CarrierNum}, or null
+// PatNum, InsSubNum, PatPlanNum, CarrierNum, SubscriberID never appear in output.
+function sanitizePatientPlanRestRow(insplanRow, index, ordinal, planNum, resolvedCarrierName) {
+  if (!insplanRow || typeof insplanRow !== "object" || Array.isArray(insplanRow)) return null;
+  const pNum = Number(planNum);
+  if (!Number.isInteger(pNum) || pNum <= 0) return null;
+  const carrierName = resolvedCarrierName ? toSafeStr(resolvedCarrierName, 120) : null;
+  const isMetlifeMatch = carrierName !== null && carrierName.toLowerCase().includes("metlife");
+  return {
+    row_label: `P${String(index + 1).padStart(3, "0")}`,
+    ordinal: Number.isInteger(Number(ordinal)) ? Number(ordinal) : null,
+    plan_num: pNum,
+    carrier_name: carrierName,
+    group_name: toSafeStr(insplanRow.GroupName, 80),
+    plan_type: toSafeStr(insplanRow.PlanType, 40),
+    fee_sched: Number.isFinite(Number(insplanRow.FeeSched)) ? Number(insplanRow.FeeSched) : 0,
+    is_metlife_match: isMetlifeMatch,
+    match_source: isMetlifeMatch ? "carrier_name" : null,
+    plan_note_present: typeof insplanRow.PlanNote === "string" ? insplanRow.PlanNote.length > 0 : false,
+    plan_note_length: typeof insplanRow.PlanNote === "string" ? insplanRow.PlanNote.length : 0,
+  };
+}
+
+// Builds a sanitized row for READ_OD_PATIENT_PLAN from MySQL JOIN query result.
+// MySQL query must include Ordinal from patplan and CarrierName from carrier JOIN.
+function sanitizePatientPlanMysqlRow(row, index) {
+  if (!row || typeof row !== "object") return null;
+  const planNum = Number(row.PlanNum);
+  if (!Number.isInteger(planNum) || planNum <= 0) return null;
+  const carrierName = row.CarrierName ? toSafeStr(row.CarrierName, 120) : null;
+  const isMetlifeMatch = carrierName !== null && carrierName.toLowerCase().includes("metlife");
+  return {
+    row_label: `P${String(index + 1).padStart(3, "0")}`,
+    ordinal: Number.isInteger(Number(row.Ordinal)) ? Number(row.Ordinal) : null,
+    plan_num: planNum,
+    carrier_name: carrierName,
+    group_name: toSafeStr(row.GroupName, 80),
+    plan_type: toSafeStr(row.PlanType, 40),
+    fee_sched: Number.isFinite(Number(row.FeeSched)) ? Number(row.FeeSched) : 0,
+    is_metlife_match: isMetlifeMatch,
+    match_source: isMetlifeMatch ? "carrier_name" : null,
+    plan_note_present: Number(row.PlanNotePresent) === 1,
+    plan_note_length: Number(row.PlanNoteLength) || 0,
+  };
+}
+
 module.exports = {
   sanitizeRestRow,
   sanitizeMysqlRow,
   sanitizeRestRowWithCarrier,
   sanitizeMysqlRowFiltered,
   sanitizeFilter,
+  sanitizePatNum,
+  sanitizePatientPlanRestRow,
+  sanitizePatientPlanMysqlRow,
 };
