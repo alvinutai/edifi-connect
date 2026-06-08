@@ -143,6 +143,7 @@ const AGENT_CAPABILITIES = [
   "READ_OD_PLAN_BENEFITS",
   "READ_OD_PLAN_NUMS",
   "READ_OD_PATIENT_PLAN",
+  "REPORT_OD_PATNUM_CANDIDATES",
 ];
 
 function loadConfig() {
@@ -616,6 +617,9 @@ async function handleCommand(msg) {
       case "READ_OD_PATIENT_PLAN":
         await handleReadOdPatientPlan(command_id, payload);
         break;
+      case "REPORT_OD_PATNUM_CANDIDATES":
+        await handleReportOdPatNumCandidates(command_id);
+        break;
       default:
         sendCommandResult(
           command_id,
@@ -1051,6 +1055,66 @@ async function handleTestOdRestAuth(commandId) {
     http_status,
     error_category,
     response_records,
+  });
+}
+
+// ── REPORT_OD_PATNUM_CANDIDATES ───────────────────────────────────────────────
+// Fetches today + next 2 days of scheduled appointments via OD REST.
+// Returns deduplicated positive-integer PatNums only — no PHI, no raw records.
+// Max 10 candidates. Safe to dispatch before any patient-specific command.
+
+const { extractPatNumCandidates } = require("./lib/od-patnum-candidates");
+
+async function handleReportOdPatNumCandidates(commandId) {
+  const missing = !config.od_api_url
+    ? "NO_OD_API_URL"
+    : !config.od_customer_key
+      ? "NO_OD_CUSTOMER_KEY"
+      : null;
+
+  if (missing) {
+    sendCommandResult(commandId, "REPORT_OD_PATNUM_CANDIDATES", "COMPLETED", {
+      office_id: config.office_id,
+      command: "REPORT_OD_PATNUM_CANDIDATES",
+      source: "open_dental_rest_appointments",
+      candidate_pat_nums: [],
+      count: 0,
+      phi_returned: false,
+      status: missing,
+    });
+    return;
+  }
+
+  const today = new Date();
+  const dates = [0, 1, 2].map((n) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + n);
+    return d.toISOString().slice(0, 10);
+  });
+
+  const aptArrays = [];
+  for (const date of dates) {
+    try {
+      const apts = await odGet(`/appointments?date=${date}`);
+      aptArrays.push(Array.isArray(apts) ? apts : []);
+    } catch (e) {
+      log(
+        `[REPORT_OD_PATNUM_CANDIDATES] fetch error ${date}: ${String(e.message ?? "unknown").slice(0, 80)}`,
+      );
+      aptArrays.push([]);
+    }
+  }
+
+  const candidates = extractPatNumCandidates(aptArrays);
+
+  sendCommandResult(commandId, "REPORT_OD_PATNUM_CANDIDATES", "COMPLETED", {
+    office_id: config.office_id,
+    command: "REPORT_OD_PATNUM_CANDIDATES",
+    source: "open_dental_rest_appointments",
+    candidate_pat_nums: candidates,
+    count: candidates.length,
+    phi_returned: false,
+    status: "ok",
   });
 }
 
