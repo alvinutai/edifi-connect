@@ -1848,8 +1848,7 @@ async function handleReadOdPatientPlan(commandId, payload) {
     if (
       config.od_mysql &&
       config.od_mysql.host &&
-      config.od_mysql.user &&
-      config.od_mysql.password
+      config.od_mysql.user
     ) {
       cfg = config.od_mysql;
     } else {
@@ -1859,7 +1858,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
         log(`[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`);
       }
     }
-    if (cfg && cfg.host && cfg.user && cfg.password) {
+    // Empty-string password is valid for OD MySQL installs with no password set.
+    // Guard only host + user — do not gate on cfg.password truthiness.
+    if (cfg && cfg.host && cfg.user) {
       try {
         mysqlAvailable = true;
         const mysql = require("mysql2/promise");

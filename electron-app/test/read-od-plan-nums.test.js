@@ -71,7 +71,10 @@ test("T1: REST sanitizer outputs only allowlisted fields", () => {
 
 // ── T2: REST carrier_name is always null ─────────────────────────────────────
 test("T2: REST sanitizer sets carrier_name to null (REST returns CarrierNum not CarrierName)", () => {
-  const out = sanitizeRestRow({ PlanNum: 47, CarrierNum: 12, CarrierName: "Delta" }, 0);
+  const out = sanitizeRestRow(
+    { PlanNum: 47, CarrierNum: 12, CarrierName: "Delta" },
+    0,
+  );
   assert.strictEqual(out.carrier_name, null);
 });
 
@@ -93,7 +96,10 @@ test("T4: REST sanitizer coerces nested objects and arrays to empty string", () 
 
 // ── T5: PlanNote stripped — only metadata returned ───────────────────────────
 test("T5: REST sanitizer does not expose PlanNote value", () => {
-  const out = sanitizeRestRow({ PlanNum: 1, PlanNote: "Call insurer first" }, 0);
+  const out = sanitizeRestRow(
+    { PlanNum: 1, PlanNote: "Call insurer first" },
+    0,
+  );
   assert.ok(!("PlanNote" in out), "PlanNote must not appear in output");
   assert.strictEqual(out.plan_note_present, true);
   assert.strictEqual(out.plan_note_length, 18);
@@ -228,7 +234,10 @@ test("T15: bridge.js MySQL query uses CHAR_LENGTH (not bare LENGTH)", () => {
     "utf8",
   );
   const idx = src.indexOf("async function handleReadOdPlanNums");
-  assert.ok(idx > -1, "async function handleReadOdPlanNums must exist in bridge.js");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPlanNums must exist in bridge.js",
+  );
   const handlerSrc = src.slice(idx, idx + 12000);
   assert.ok(
     handlerSrc.includes("CHAR_LENGTH"),
@@ -245,7 +254,10 @@ test("T15: bridge.js MySQL query uses CHAR_LENGTH (not bare LENGTH)", () => {
 test("T15b: main.js MySQL query uses CHAR_LENGTH (not bare LENGTH)", () => {
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPlanNums");
-  assert.ok(idx > -1, "async function handleReadOdPlanNums must exist in main.js");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPlanNums must exist in main.js",
+  );
   const handlerSrc = src.slice(idx, idx + 12000);
   assert.ok(
     handlerSrc.includes("CHAR_LENGTH"),
@@ -288,7 +300,9 @@ test("T18: REST sanitizer: empty PlanNote string → plan_note_present false, le
 
 // ── CF1: sanitizeFilter strips non-allowed characters ────────────────────────
 test("CF1: sanitizeFilter strips chars outside alphanumeric/space/hyphen/period", () => {
-  const result = sanitizeFilter("met<script>life!@#$%^&*()=+[]{}|;:'\",<>?/\\~`");
+  const result = sanitizeFilter(
+    "met<script>life!@#$%^&*()=+[]{}|;:'\",<>?/\\~`",
+  );
   assert.ok(!result.includes("<"), "< must be stripped");
   assert.ok(!result.includes(">"), "> must be stripped");
   assert.ok(!result.includes("!"), "! must be stripped");
@@ -458,7 +472,11 @@ test("CF15: bridge.js MySQL filtered query uses ? placeholders (no string interp
 test("PP1: sanitizePatNum rejects 0, negative, float, string, null, undefined", () => {
   const bad = [0, -1, -100, 1.5, "abc", "47", "0", null, undefined, {}, []];
   for (const v of bad) {
-    assert.throws(() => sanitizePatNum(v), /INVALID_PAT_NUM/, `Expected throw for: ${JSON.stringify(v)}`);
+    assert.throws(
+      () => sanitizePatNum(v),
+      /INVALID_PAT_NUM/,
+      `Expected throw for: ${JSON.stringify(v)}`,
+    );
   }
 });
 
@@ -471,7 +489,16 @@ test("PP2: sanitizePatNum accepts positive integer and returns integer", () => {
 
 // ── PP3: sanitizePatientPlanRestRow strips PHI fields ────────────────────────
 test("PP3: sanitizePatientPlanRestRow strips PatPlanNum, InsSubNum, SubscriberID, PatNum from output", () => {
-  const insplan = { GroupName: "All Smiles", PlanType: "PPO", FeeSched: 53, CarrierNum: 12, SubscriberID: "MBR123", PatNum: 555, PatPlanNum: 1, InsSubNum: 8 };
+  const insplan = {
+    GroupName: "All Smiles",
+    PlanType: "PPO",
+    FeeSched: 53,
+    CarrierNum: 12,
+    SubscriberID: "MBR123",
+    PatNum: 555,
+    PatPlanNum: 1,
+    InsSubNum: 8,
+  };
   const out = sanitizePatientPlanRestRow(insplan, 0, 1, 47, "MetLife PPO");
   assert.ok(!("PatPlanNum" in out), "PatPlanNum must not appear");
   assert.ok(!("InsSubNum" in out), "InsSubNum must not appear");
@@ -482,30 +509,61 @@ test("PP3: sanitizePatientPlanRestRow strips PatPlanNum, InsSubNum, SubscriberID
 
 // ── PP4: sanitizePatientPlanRestRow includes ordinal and plan_num ─────────────
 test("PP4: sanitizePatientPlanRestRow includes ordinal and plan_num", () => {
-  const out = sanitizePatientPlanRestRow({ GroupName: "X", PlanType: "PPO", FeeSched: 0 }, 0, 1, 47, "MetLife");
+  const out = sanitizePatientPlanRestRow(
+    { GroupName: "X", PlanType: "PPO", FeeSched: 0 },
+    0,
+    1,
+    47,
+    "MetLife",
+  );
   assert.strictEqual(out.ordinal, 1);
   assert.strictEqual(out.plan_num, 47);
 });
 
 // ── PP5: is_metlife_match true for MetLife variants ──────────────────────────
 test("PP5: is_metlife_match true when carrier_name is Metlife, MetLife, METLIFE", () => {
-  for (const name of ["Metlife", "MetLife", "METLIFE", "MetLife PPO", "metlife"]) {
+  for (const name of [
+    "Metlife",
+    "MetLife",
+    "METLIFE",
+    "MetLife PPO",
+    "metlife",
+  ]) {
     const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, name);
-    assert.strictEqual(out.is_metlife_match, true, `Expected match for: ${name}`);
+    assert.strictEqual(
+      out.is_metlife_match,
+      true,
+      `Expected match for: ${name}`,
+    );
     assert.strictEqual(out.match_source, "carrier_name");
   }
 });
 
 // ── PP6: is_metlife_match false for non-MetLife carriers ─────────────────────
 test("PP6: is_metlife_match false for Delta Dental", () => {
-  const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "Delta Dental");
+  const out = sanitizePatientPlanRestRow(
+    { GroupName: "X" },
+    0,
+    1,
+    47,
+    "Delta Dental",
+  );
   assert.strictEqual(out.is_metlife_match, false);
   assert.strictEqual(out.match_source, null);
 });
 
 // ── PP7: Result caps at 20 plans ─────────────────────────────────────────────
 test("PP7: sanitizePatientPlanMysqlRow row_label for 20th row is P020", () => {
-  const row = { PlanNum: 999, CarrierName: "Delta", GroupName: "G", PlanType: "PPO", FeeSched: 0, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 2 };
+  const row = {
+    PlanNum: 999,
+    CarrierName: "Delta",
+    GroupName: "G",
+    PlanType: "PPO",
+    FeeSched: 0,
+    PlanNotePresent: 0,
+    PlanNoteLength: 0,
+    Ordinal: 2,
+  };
   const out = sanitizePatientPlanMysqlRow(row, 19);
   assert.strictEqual(out.row_label, "P020");
 });
@@ -514,20 +572,41 @@ test("PP7: sanitizePatientPlanMysqlRow row_label for 20th row is P020", () => {
 test("PP8: main.js source confirms /patplans?PatNum= is used (not /patients/{patNum}/insplans)", () => {
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
-  assert.ok(idx > -1, "async function handleReadOdPatientPlan must exist in main.js");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPatientPlan must exist in main.js",
+  );
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("/patplans?PatNum="), "main.js handler must use /patplans?PatNum=");
-  assert.ok(!handlerSrc.includes("/patients/"), "main.js handler must NOT use /patients/{patNum}/insplans");
+  assert.ok(
+    handlerSrc.includes("/patplans?PatNum="),
+    "main.js handler must use /patplans?PatNum=",
+  );
+  assert.ok(
+    !handlerSrc.includes("/patients/"),
+    "main.js handler must NOT use /patients/{patNum}/insplans",
+  );
 });
 
 // ── PP9: bridge.js parity — same endpoint as main.js ─────────────────────────
 test("PP9: bridge.js source confirms /patplans?PatNum= is used and parity with main.js", () => {
-  const src = fs.readFileSync(path.join(__dirname, "../../service/bridge.js"), "utf8");
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../service/bridge.js"),
+    "utf8",
+  );
   const idx = src.indexOf("async function handleReadOdPatientPlan");
-  assert.ok(idx > -1, "async function handleReadOdPatientPlan must exist in bridge.js");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPatientPlan must exist in bridge.js",
+  );
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("/patplans?PatNum="), "bridge.js handler must use /patplans?PatNum=");
-  assert.ok(!handlerSrc.includes("/patients/"), "bridge.js handler must NOT use /patients/{patNum}/insplans");
+  assert.ok(
+    handlerSrc.includes("/patplans?PatNum="),
+    "bridge.js handler must use /patplans?PatNum=",
+  );
+  assert.ok(
+    !handlerSrc.includes("/patients/"),
+    "bridge.js handler must NOT use /patients/{patNum}/insplans",
+  );
 });
 
 // ── PP10: carrier resolution uses timeout: 2000 ───────────────────────────────
@@ -535,7 +614,10 @@ test("PP10: main.js handleReadOdPatientPlan carrier resolution uses timeout: 200
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("timeout: 2000"), "carrier resolution must use timeout: 2000");
+  assert.ok(
+    handlerSrc.includes("timeout: 2000"),
+    "carrier resolution must use timeout: 2000",
+  );
 });
 
 // ── PP11: MySQL query uses ? placeholder ──────────────────────────────────────
@@ -543,7 +625,10 @@ test("PP11: main.js MySQL query uses ? placeholder for PatNum (not string interp
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("WHERE pp.PatNum = ?"), "MySQL must use parameterized ? for PatNum");
+  assert.ok(
+    handlerSrc.includes("WHERE pp.PatNum = ?"),
+    "MySQL must use parameterized ? for PatNum",
+  );
 });
 
 // ── PP12: MySQL query has LIMIT 20 ───────────────────────────────────────────
@@ -556,14 +641,32 @@ test("PP12: main.js MySQL query has LIMIT 20", () => {
 
 // ── PP13: pat_num absent from sanitized result ────────────────────────────────
 test("PP13: sanitizePatientPlanRestRow does not include pat_num in output", () => {
-  const out = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "MetLife");
-  assert.ok(!("pat_num" in out), "pat_num must not appear in output (plan_num is the allowed field)");
+  const out = sanitizePatientPlanRestRow(
+    { GroupName: "X" },
+    0,
+    1,
+    47,
+    "MetLife",
+  );
+  assert.ok(
+    !("pat_num" in out),
+    "pat_num must not appear in output (plan_num is the allowed field)",
+  );
   assert.ok("plan_num" in out, "plan_num must appear in output");
 });
 
 // ── PP14: is_metlife_match survives sanitizePatientPlanMysqlRow ───────────────
 test("PP14: sanitizePatientPlanMysqlRow is_metlife_match is true for MetLife carrier", () => {
-  const row = { PlanNum: 47, CarrierName: "MetLife PPO", GroupName: "G", PlanType: "PPO", FeeSched: 53, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 1 };
+  const row = {
+    PlanNum: 47,
+    CarrierName: "MetLife PPO",
+    GroupName: "G",
+    PlanType: "PPO",
+    FeeSched: 53,
+    PlanNotePresent: 0,
+    PlanNoteLength: 0,
+    Ordinal: 1,
+  };
   const out = sanitizePatientPlanMysqlRow(row, 0);
   assert.strictEqual(out.is_metlife_match, true);
   assert.strictEqual(out.match_source, "carrier_name");
@@ -571,7 +674,12 @@ test("PP14: sanitizePatientPlanMysqlRow is_metlife_match is true for MetLife car
 
 // ── PP15: SubscriberID dropped by sanitizePatientPlanRestRow ─────────────────
 test("PP15: sanitizePatientPlanRestRow drops SubscriberID", () => {
-  const insplan = { GroupName: "X", SubscriberID: "MBR123", PlanType: "PPO", FeeSched: 0 };
+  const insplan = {
+    GroupName: "X",
+    SubscriberID: "MBR123",
+    PlanType: "PPO",
+    FeeSched: 0,
+  };
   const out = sanitizePatientPlanRestRow(insplan, 0, 1, 47, "Delta");
   assert.ok(!("SubscriberID" in out), "SubscriberID must not appear in output");
 });
@@ -579,10 +687,34 @@ test("PP15: sanitizePatientPlanRestRow drops SubscriberID", () => {
 // ── PP_NEW1: payload_json stores pat_num as [REDACTED] ────────────────────────
 test("PP_NEW1: main.js handleReadOdPatientPlan source — pat_num never in result object", () => {
   // Verify sanitizer does not emit pat_num at any level
-  const restRow = sanitizePatientPlanRestRow({ GroupName: "X" }, 0, 1, 47, "MetLife");
-  assert.ok(!("pat_num" in restRow), "pat_num must not appear in REST row output");
-  const mysqlRow = sanitizePatientPlanMysqlRow({ PlanNum: 47, CarrierName: "MetLife", GroupName: "G", PlanType: "PPO", FeeSched: 0, PlanNotePresent: 0, PlanNoteLength: 0, Ordinal: 1 }, 0);
-  assert.ok(!("pat_num" in mysqlRow), "pat_num must not appear in MySQL row output");
+  const restRow = sanitizePatientPlanRestRow(
+    { GroupName: "X" },
+    0,
+    1,
+    47,
+    "MetLife",
+  );
+  assert.ok(
+    !("pat_num" in restRow),
+    "pat_num must not appear in REST row output",
+  );
+  const mysqlRow = sanitizePatientPlanMysqlRow(
+    {
+      PlanNum: 47,
+      CarrierName: "MetLife",
+      GroupName: "G",
+      PlanType: "PPO",
+      FeeSched: 0,
+      PlanNotePresent: 0,
+      PlanNoteLength: 0,
+      Ordinal: 1,
+    },
+    0,
+  );
+  assert.ok(
+    !("pat_num" in mysqlRow),
+    "pat_num must not appear in MySQL row output",
+  );
 });
 
 // ── PP_NEW2: Log step codes used; PatNum value not interpolated in log strings ─
@@ -593,13 +725,31 @@ test("PP_NEW2: main.js handler log() calls use step codes, not raw PatNum values
   // Extract only log() call lines to check — URL construction is allowed to reference patNum
   const logLines = handlerSrc.split("\n").filter((l) => l.includes("log("));
   for (const line of logLines) {
-    assert.ok(!line.includes("${patNum}"), `log() line must not interpolate patNum: ${line.trim()}`);
-    assert.ok(!line.includes("${pat_num}"), `log() line must not interpolate pat_num: ${line.trim()}`);
+    assert.ok(
+      !line.includes("${patNum}"),
+      `log() line must not interpolate patNum: ${line.trim()}`,
+    );
+    assert.ok(
+      !line.includes("${pat_num}"),
+      `log() line must not interpolate pat_num: ${line.trim()}`,
+    );
   }
-  assert.ok(handlerSrc.includes("PATPLAN_LOOKUP_FAILED"), "must use step code PATPLAN_LOOKUP_FAILED");
-  assert.ok(handlerSrc.includes("INSSUB_LOOKUP_FAILED"), "must use step code INSSUB_LOOKUP_FAILED");
-  assert.ok(handlerSrc.includes("INSPLAN_LOOKUP_FAILED"), "must use step code INSPLAN_LOOKUP_FAILED");
-  assert.ok(handlerSrc.includes("CARRIER_LOOKUP_FAILED"), "must use step code CARRIER_LOOKUP_FAILED");
+  assert.ok(
+    handlerSrc.includes("PATPLAN_LOOKUP_FAILED"),
+    "must use step code PATPLAN_LOOKUP_FAILED",
+  );
+  assert.ok(
+    handlerSrc.includes("INSSUB_LOOKUP_FAILED"),
+    "must use step code INSSUB_LOOKUP_FAILED",
+  );
+  assert.ok(
+    handlerSrc.includes("INSPLAN_LOOKUP_FAILED"),
+    "must use step code INSPLAN_LOOKUP_FAILED",
+  );
+  assert.ok(
+    handlerSrc.includes("CARRIER_LOOKUP_FAILED"),
+    "must use step code CARRIER_LOOKUP_FAILED",
+  );
 });
 
 // ── PP_NEW3: main.js calls /patplans?PatNum= (Codex R1 verification) ─────────
@@ -607,8 +757,14 @@ test("PP_NEW3: main.js source inspection — calls /patplans?PatNum= (not /patie
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("/patplans?PatNum="), "must call /patplans?PatNum=");
-  assert.ok(!handlerSrc.includes("/patients/"), "must NOT call /patients/{patNum}/insplans");
+  assert.ok(
+    handlerSrc.includes("/patplans?PatNum="),
+    "must call /patplans?PatNum=",
+  );
+  assert.ok(
+    !handlerSrc.includes("/patients/"),
+    "must NOT call /patients/{patNum}/insplans",
+  );
 });
 
 // ── PP_NEW4: main.js calls /inssubs/ to resolve InsSubNum → PlanNum ──────────
@@ -616,7 +772,10 @@ test("PP_NEW4: main.js source inspection — calls /inssubs/ to resolve InsSubNu
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("/inssubs/"), "must call /inssubs/{InsSubNum} to resolve PlanNum");
+  assert.ok(
+    handlerSrc.includes("/inssubs/"),
+    "must call /inssubs/{InsSubNum} to resolve PlanNum",
+  );
 });
 
 // ── PP_NEW5: MySQL query uses isub.DateTerm, not pp.PatStatus ────────────────
@@ -624,8 +783,116 @@ test("PP_NEW5: main.js MySQL query uses isub.DateTerm and does NOT contain pp.Pa
   const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const idx = src.indexOf("async function handleReadOdPatientPlan");
   const handlerSrc = src.slice(idx, idx + 8000);
-  assert.ok(handlerSrc.includes("isub.DateTerm"), "MySQL query must use isub.DateTerm for active plan filter");
-  assert.ok(!handlerSrc.includes("pp.PatStatus"), "MySQL query must NOT use pp.PatStatus (not on patplan table)");
+  assert.ok(
+    handlerSrc.includes("isub.DateTerm"),
+    "MySQL query must use isub.DateTerm for active plan filter",
+  );
+  assert.ok(
+    !handlerSrc.includes("pp.PatStatus"),
+    "MySQL query must NOT use pp.PatStatus (not on patplan table)",
+  );
+});
+
+// ── PP_GRD1: bridge.js cfg guard does not check cfg.password truthiness ───────
+// Regression: v2.3.68 had `if (cfg && cfg.host && cfg.user && cfg.password)`.
+// Empty-string password ("") is falsy — guard blocked MySQL on passwordless OD installs.
+// v2.3.69 fix: removed password from guard; host + user are sufficient.
+test("PP_GRD1: bridge.js READ_OD_PATIENT_PLAN cfg guard checks only host and user (not password)", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../service/bridge.js"),
+    "utf8",
+  );
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPatientPlan must exist in bridge.js",
+  );
+  const handlerSrc = src.slice(idx, idx + 8000);
+  // Fixed guard must be present
+  assert.ok(
+    handlerSrc.includes("if (cfg && cfg.host && cfg.user)"),
+    "bridge.js must use fixed guard without password",
+  );
+  // Old guard must be absent (password-gated form)
+  assert.ok(
+    !handlerSrc.includes("cfg.host && cfg.user && cfg.password"),
+    "bridge.js READ_OD_PATIENT_PLAN handler must NOT gate MySQL on cfg.password (v2.3.68 bug)",
+  );
+});
+
+// ── PP_GRD2: main.js cfg guard does not check cfg.password truthiness ─────────
+test("PP_GRD2: main.js READ_OD_PATIENT_PLAN cfg guard checks only host and user (not password)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  assert.ok(
+    idx > -1,
+    "async function handleReadOdPatientPlan must exist in main.js",
+  );
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(
+    handlerSrc.includes("if (cfg && cfg.host && cfg.user)"),
+    "main.js must use fixed guard without password",
+  );
+  assert.ok(
+    !handlerSrc.includes("cfg.host && cfg.user && cfg.password"),
+    "main.js READ_OD_PATIENT_PLAN handler must NOT gate MySQL on cfg.password (v2.3.68 bug)",
+  );
+});
+
+// ── PP_GRD3: bridge.js config.od_mysql branch does not check password ─────────
+test("PP_GRD3: bridge.js config.od_mysql branch checks only host and user (not password)", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "../../service/bridge.js"),
+    "utf8",
+  );
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(
+    !handlerSrc.includes("config.od_mysql.password"),
+    "bridge.js must NOT gate on config.od_mysql.password in READ_OD_PATIENT_PLAN handler",
+  );
+});
+
+// ── PP_GRD4: main.js config.od_mysql branch does not check password ───────────
+test("PP_GRD4: main.js config.od_mysql branch checks only host and user (not password)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const idx = src.indexOf("async function handleReadOdPatientPlan");
+  const handlerSrc = src.slice(idx, idx + 8000);
+  assert.ok(
+    !handlerSrc.includes("config.od_mysql.password"),
+    "main.js must NOT gate on config.od_mysql.password in READ_OD_PATIENT_PLAN handler",
+  );
+});
+
+// ── PP_GRD5: parity — both runtimes have matching guards ─────────────────────
+test("PP_GRD5: bridge.js and main.js READ_OD_PATIENT_PLAN handlers have parity on cfg guard", () => {
+  const bridgeSrc = fs.readFileSync(
+    path.join(__dirname, "../../service/bridge.js"),
+    "utf8",
+  );
+  const mainSrc = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
+  const bIdx = bridgeSrc.indexOf("async function handleReadOdPatientPlan");
+  const mIdx = mainSrc.indexOf("async function handleReadOdPatientPlan");
+  const bridge = bridgeSrc.slice(bIdx, bIdx + 8000);
+  const main = mainSrc.slice(mIdx, mIdx + 8000);
+  // Both must have the fixed guard
+  assert.ok(
+    bridge.includes("if (cfg && cfg.host && cfg.user)"),
+    "bridge.js must have fixed cfg guard",
+  );
+  assert.ok(
+    main.includes("if (cfg && cfg.host && cfg.user)"),
+    "main.js must have fixed cfg guard",
+  );
+  // Neither must have the old password-gated guard
+  assert.ok(
+    !bridge.includes("cfg.host && cfg.user && cfg.password"),
+    "bridge.js must not have old password guard",
+  );
+  assert.ok(
+    !main.includes("cfg.host && cfg.user && cfg.password"),
+    "main.js must not have old password guard",
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
