@@ -1652,7 +1652,7 @@ async function handleReadOdPlanNums(commandId, payload) {
             const carrierNum = Number(row.CarrierNum);
             const resolvedName =
               Number.isInteger(carrierNum) && carrierNum > 0
-                ? carrierMap.get(carrierNum) ?? null
+                ? (carrierMap.get(carrierNum) ?? null)
                 : null;
             const nameMatch =
               resolvedName !== null &&
@@ -1869,7 +1869,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
         });
         patPlanRows = Array.isArray(resp.data) ? resp.data : [];
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         throw e;
       }
 
@@ -1889,7 +1891,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           sub = subResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
@@ -1909,19 +1913,24 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           insplan = planResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
         if (!insplan) continue;
 
-        const ordinal = Number.isInteger(Number(pp.Ordinal)) ? Number(pp.Ordinal) : null;
+        const ordinal = Number.isInteger(Number(pp.Ordinal))
+          ? Number(pp.Ordinal)
+          : null;
         const carrierNum = Number(insplan.CarrierNum);
         planEntries.push({
           ordinal,
           planNum,
           insplan,
-          carrierNum: Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
+          carrierNum:
+            Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
         });
         if (planEntries.length >= 20) break;
       }
@@ -1948,7 +1957,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
                     : null,
               }))
               .catch((e) => {
-                log(`[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+                log(
+                  `[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+                );
                 return { num, name: null };
               }),
           ),
@@ -1962,7 +1973,7 @@ async function handleReadOdPatientPlan(commandId, payload) {
       plans = planEntries
         .map((entry, i) => {
           const resolvedName = entry.carrierNum
-            ? carrierMap.get(entry.carrierNum) ?? null
+            ? (carrierMap.get(entry.carrierNum) ?? null)
             : null;
           return sanitizePatientPlanRestRow(
             entry.insplan,
@@ -1982,17 +1993,15 @@ async function handleReadOdPatientPlan(commandId, payload) {
 
   if (source === "NONE") {
     let cfg = null;
-    if (
-      config.od_mysql &&
-      config.od_mysql.host &&
-      config.od_mysql.user
-    ) {
+    if (config.od_mysql && config.od_mysql.host && config.od_mysql.user) {
       cfg = config.od_mysql;
     } else {
       try {
         cfg = await readOdConfig();
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
       }
     }
     // Empty-string password is valid for OD MySQL installs with no password set.
@@ -2032,13 +2041,17 @@ async function handleReadOdPatientPlan(commandId, payload) {
             `,
             [patNum],
           );
-          plans = rows.map((row, i) => sanitizePatientPlanMysqlRow(row, i)).filter(Boolean);
+          plans = rows
+            .map((row, i) => sanitizePatientPlanMysqlRow(row, i))
+            .filter(Boolean);
           source = "MYSQL_PATPLAN";
         } finally {
           await conn.end().catch(() => {});
         }
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         mysqlAvailable = false;
       }
     }
@@ -5083,7 +5096,7 @@ app.whenReady().then(() => {
   // Every future update after v2.3.0 is completely invisible to office staff.
   try {
     autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on("checking-for-update", () => {
       update_status.checking = true;
       update_status.last_check_at = new Date().toISOString();
@@ -5103,12 +5116,8 @@ app.whenReady().then(() => {
       update_status.downloaded = true;
       update_status.last_download_at = new Date().toISOString();
       update_status.last_error = null;
-      log("[Updater] Update downloaded — auto-installing in 10 seconds");
-      // Auto-install 10 seconds after download — no manual trigger needed
-      setTimeout(() => {
-        log("[Updater] Auto-installing update now");
-        autoUpdater.quitAndInstall(true, true);
-      }, 10_000);
+      // Install only on explicit QUIT_AND_INSTALL remote command — no auto-restart.
+      log("[Updater] Update downloaded — awaiting QUIT_AND_INSTALL command");
     });
     autoUpdater.on("error", (err) => {
       update_status.checking = false;
@@ -5146,21 +5155,22 @@ app.whenReady().then(() => {
 
   log(`EDiFi Connect started v${app.getVersion()}`);
 
-  // Second auto-update block — registers additional listeners and re-checks on app ready.
+  // Second auto-update block — registers additional tray and error listeners.
   try {
     autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on("update-downloaded", () => {
       update_status.downloaded = true;
       update_status.last_download_at = new Date().toISOString();
-      log("[Update] New version downloaded — will install on next restart");
+      log(
+        "[Update] New version downloaded — awaiting QUIT_AND_INSTALL command",
+      );
       updateTray();
     });
     autoUpdater.on("error", (err) => {
       update_status.last_error = err.message.slice(0, 200);
       log(`[Update] ${err.message}`);
     });
-    autoUpdater.checkForUpdates().catch(() => {});
   } catch (e) {
     log(`[Update] electron-updater not available: ${e.message}`);
   }
