@@ -1,5 +1,5 @@
 {
-  "description": "All Smiles MetLife — CovCatNum=0 but EbenefitCat present",
+  "description": "Pilot Office Carrier A — CovCatNum=0, EbenefitCat ABSENT (production failure pattern, synthetic data)",
   "covcat": [
     { "CovCatNum": 1, "Description": "General", "EbenefitCat": 1 },
     { "CovCatNum": 2, "Description": "Preventive", "EbenefitCat": 2 },
@@ -7,94 +7,85 @@
   ],
   "benefits": [
     {
-      "BenefitNum": 201,
-      "PlanNum": 9002,
+      "BenefitNum": 301,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 2,
       "Percent": "100",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 2
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 202,
-      "PlanNum": 9002,
+      "BenefitNum": 302,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "100",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 2
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 203,
-      "PlanNum": 9002,
+      "BenefitNum": 303,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 12,
       "Percent": "90",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 8
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 204,
-      "PlanNum": 9002,
+      "BenefitNum": 304,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "80",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 4
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 205,
-      "PlanNum": 9002,
+      "BenefitNum": 305,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "80",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 5
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 206,
-      "PlanNum": 9002,
+      "BenefitNum": 306,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "50",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 6
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 207,
-      "PlanNum": 9002,
+      "BenefitNum": 307,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "50",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 7
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 208,
-      "PlanNum": 9002,
+      "BenefitNum": 308,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 7,
       "Percent": "50",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 8
+      "CoverageLevel": "Individual"
     },
     {
-      "BenefitNum": 209,
-      "PlanNum": 9002,
+      "BenefitNum": 309,
+      "PlanNum": 9003,
       "PatPlanNum": 0,
       "BenefitType": 1,
       "CovCatNum": 0,
       "Percent": "50",
-      "CoverageLevel": "Individual",
-      "EbenefitCat": 8
+      "CoverageLevel": "Individual"
     }
   ]
 }

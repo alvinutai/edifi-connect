@@ -36,7 +36,7 @@ and OD descriptions can carry office free text. Excluded deliberately.
 
 Production Phase 6C-1 counts at the pilot office: 196 coverage rows + 276
 frequency rows sit at UNMAPPED solely because the agent never forwarded the
-procedure linkage. The replay fixture `allsmiles-codenum.json` proves the
+procedure linkage. The replay fixture `pilot-office-codenum.json` proves the
 conversion shape: 7 of 8 previously-blocked synthetic rows become resolvable;
 true blanks (no covcat, no eben, no code) stay honestly unmapped.
 

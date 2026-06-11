@@ -1,5 +1,5 @@
 {
-  "description": "All Smiles MetLife shape + Phase 6D-1 CodeNum forwarding — the 6 CovCatNum=0 rows are procedure-attached and become resolvable once proc_code is forwarded (synthetic data)",
+  "description": "Pilot Office Carrier A shape + Phase 6D-1 CodeNum forwarding — the 6 CovCatNum=0 rows are procedure-attached and become resolvable once proc_code is forwarded (synthetic data)",
   "covcat": [
     { "CovCatNum": 1, "Description": "General", "EbenefitCat": 1 },
     { "CovCatNum": 2, "Description": "Preventive", "EbenefitCat": 2 },
