@@ -3423,6 +3423,33 @@ async function getOdCovCats() {
   return defaults;
 }
 
+// Phase 6D-1: CodeNum → CDT code (ProcCode string) cache for benefit mapping.
+// Reuses the same /procedurecodes endpoint the fee-schedule sync already calls —
+// no new Open Dental call class. On fetch failure nothing is cached so the next
+// sync retries; benefit mapping continues with proc_code=null (never blocks a push).
+let odProcCodeCache = null; // { CodeNum: "D1110", ... }
+
+async function getOdProcCodes() {
+  if (odProcCodeCache) return odProcCodeCache;
+  try {
+    const procs = await odGet("/procedurecodes");
+    if (Array.isArray(procs) && procs.length > 0) {
+      const map = {};
+      for (const p of procs) {
+        if (p.CodeNum && p.ProcCode) map[p.CodeNum] = String(p.ProcCode);
+      }
+      odProcCodeCache = map;
+      log(
+        `[OD Benefits] ProcCode cache warmed: ${Object.keys(map).length} codes`,
+      );
+      return map;
+    }
+  } catch (e) {
+    log(`[OD Benefits] ProcCode cache fetch failed (will retry): ${e.message}`);
+  }
+  return {};
+}
+
 function mapOdApiBenefits(rawBenefits) {
   // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
@@ -3497,6 +3524,7 @@ function mapOdApiBenefits(rawBenefits) {
           `pct=${b.Percent} → category=${category} src=${categorySource}`,
       );
     }
+    const code_num = Number(b.CodeNum) || null;
     const entry = {
       type,
       category,
@@ -3507,6 +3535,15 @@ function mapOdApiBenefits(rawBenefits) {
       category_source: categorySource,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,
+      // Phase 6D-1: forward procedure linkage. Null-safe — a cold/failed
+      // ProcCode cache forwards code_num alone and never drops the row.
+      code_num,
+      proc_code:
+        (code_num != null &&
+          odProcCodeCache != null &&
+          typeof odProcCodeCache[code_num] === "string" &&
+          odProcCodeCache[code_num]) ||
+        null,
     };
     if (type === "CoInsurance") {
       entry.percent = Number(b.Percent);
@@ -3600,8 +3637,11 @@ async function syncODData(syncDate = null) {
       `[OD Sync] ${scheduled.length} scheduled appointments — fetching patient data...`,
     );
 
-    // Pre-warm coverage category cache so benefit mapping is accurate
+    // Pre-warm coverage category + procedure code caches so benefit mapping
+    // is accurate. Either cache failing degrades gracefully (GENERAL category /
+    // null proc_code) — never blocks the sync.
     await getOdCovCats();
+    await getOdProcCodes();
 
     // Fetch operatory names once — used to label appointment cards correctly
     const operatoryMap = await getOperatoryMap();

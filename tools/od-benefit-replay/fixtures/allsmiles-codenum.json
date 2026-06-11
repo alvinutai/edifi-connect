@@ -1,0 +1,130 @@
+{
+  "description": "All Smiles MetLife shape + Phase 6D-1 CodeNum forwarding — the 6 CovCatNum=0 rows are procedure-attached and become resolvable once proc_code is forwarded (synthetic data)",
+  "covcat": [
+    { "CovCatNum": 1, "Description": "General", "EbenefitCat": 1 },
+    { "CovCatNum": 2, "Description": "Preventive", "EbenefitCat": 2 },
+    { "CovCatNum": 12, "Description": "Major", "EbenefitCat": 8 }
+  ],
+  "proccodes": {
+    "87": "D1110",
+    "233": "D0274",
+    "310": "D0220",
+    "510": "D2750",
+    "612": "D3310",
+    "744": "D4341"
+  },
+  "benefits": [
+    {
+      "BenefitNum": 301,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 2,
+      "CodeNum": 0,
+      "Percent": "100",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 302,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 87,
+      "Percent": "100",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 303,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 12,
+      "CodeNum": 0,
+      "Percent": "90",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 304,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 233,
+      "Percent": "80",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 305,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 310,
+      "Percent": "80",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 306,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 510,
+      "Percent": "50",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 307,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 612,
+      "Percent": "50",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 308,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 7,
+      "CodeNum": 0,
+      "Percent": "50",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 309,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "CodeNum": 0,
+      "Percent": "50",
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 401,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 3,
+      "CovCatNum": 0,
+      "CodeNum": 87,
+      "Quantity": 2,
+      "TimePeriod": 2,
+      "CoverageLevel": "Individual"
+    },
+    {
+      "BenefitNum": 402,
+      "PlanNum": 9003,
+      "PatPlanNum": 0,
+      "BenefitType": 3,
+      "CovCatNum": 0,
+      "CodeNum": 744,
+      "Quantity": 4,
+      "TimePeriod": 2,
+      "CoverageLevel": "Individual"
+    }
+  ]
+}

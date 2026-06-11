@@ -252,8 +252,14 @@ async function getBenefitsForPatient(patNum) {
   const { PlanNum, PatPlanNum } = planInfo;
 
   try {
+    // Phase 6D-1: BenefitNum/CovCatNum/CodeNum + procedurecode join added for
+    // parity with the REST path. LEFT JOINs are null-safe — rows without a
+    // procedure linkage (CodeNum=0) simply carry nulls.
     const [rows] = await p.query(
       `SELECT
+         b.BenefitNum,
+         b.CovCatNum,
+         b.CodeNum,
          b.BenefitType,
          b.CoverageLevel,
          b.Percent,
@@ -262,9 +268,11 @@ async function getBenefitsForPatient(patNum) {
          b.QuantityQualifier,
          b.TimePeriod,
          cc.Description AS CategoryDesc,
-         cc.EbenefitCat
+         cc.EbenefitCat,
+         pc.ProcCode
        FROM benefit b
        LEFT JOIN covcat cc ON cc.CovCatNum = b.CovCatNum
+       LEFT JOIN procedurecode pc ON pc.CodeNum = b.CodeNum
        WHERE (b.PlanNum = ? AND b.PatPlanNum = 0)
           OR b.PatPlanNum = ?
        ORDER BY b.BenefitType, cc.EbenefitCat`,
@@ -281,7 +289,16 @@ async function getBenefitsForPatient(patNum) {
         const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || "None";
         const period = TIME_PERIOD[r.TimePeriod] || "None";
 
-        const benefit = { type, category, coverage_level };
+        const benefit = {
+          type,
+          category,
+          coverage_level,
+          benefit_num: r.BenefitNum ?? null,
+          cov_cat_num: Number(r.CovCatNum) || 0,
+          ebenefitcat: Number(r.EbenefitCat ?? 0) || null,
+          code_num: Number(r.CodeNum) || null,
+          proc_code: typeof r.ProcCode === "string" && r.ProcCode ? r.ProcCode : null,
+        };
         if (type === "CoInsurance") {
           // Percent = what the plan pays (0-100). Skip -1 (not applicable).
           const pct = Number(r.Percent);
