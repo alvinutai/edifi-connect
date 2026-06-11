@@ -56,7 +56,17 @@ const libKeys = Object.keys(libEntry).filter((k) => k !== "percent");
 
 test("inline mapOdApiBenefits exists and was extracted", () => {
   assert.ok(start > -1, "mapOdApiBenefits not found in main.js");
+  // 6D-1C: a lost end anchor would make the window near-whole-file and every
+  // per-key check vacuously true — fail hard instead.
+  assert.ok(
+    end > start,
+    "end anchor (syncODData) lost — extraction window invalid",
+  );
   assert.ok(inlineSrc.length > 200, "extraction window suspiciously small");
+  assert.ok(
+    inlineSrc.length < 20000,
+    "extraction window suspiciously large — anchors drifted",
+  );
 });
 
 for (const key of libKeys) {
