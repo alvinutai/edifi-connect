@@ -185,14 +185,18 @@ function buildCatMap(covcatRows) {
 
 /**
  * Map raw OD benefit rows to structured entries.
- * Mirrors mapOdApiBenefits() in main.js exactly, minus logging and odCovCatCache.
+ * Mirrors mapOdApiBenefits() in main.js exactly, minus logging and caches.
  * Adds `ebenefitcat` and `category_source` fields (present in v2.3.64 production too).
+ * Phase 6D-1 adds `code_num` and `proc_code` — additive, null-safe, no PHI.
  *
  * @param {Array<Object>} rawBenefits  Raw rows from OD /benefits endpoint or MySQL
  * @param {Object}        catMap       Built by buildCatMap(); falls back to COV_CAT_NUM_DEFAULTS
+ * @param {Object|null}   procCodeMap  Optional CodeNum → CDT-code-string map. Missing
+ *                                     map or missing entry never drops a row — proc_code
+ *                                     stays null and code_num is still forwarded.
  * @returns {Array}  Filtered, annotated benefit entries with _raw_received/_dropped/_dropped_reasons
  */
-function mapBenefits(rawBenefits, catMap) {
+function mapBenefits(rawBenefits, catMap, procCodeMap) {
   const resolvedCatMap = catMap || COV_CAT_NUM_DEFAULTS;
   const results = [];
   const dropped_reasons = {};
@@ -210,6 +214,7 @@ function mapBenefits(rawBenefits, catMap) {
       b.EbenefitCat,
     );
     const coverage_level = COV_LEVEL[b.CoverageLevel] || "None";
+    const code_num = Number(b.CodeNum) || null;
 
     const entry = {
       type,
@@ -221,6 +226,13 @@ function mapBenefits(rawBenefits, catMap) {
       category_source: categorySource,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,
+      code_num,
+      proc_code:
+        (code_num != null &&
+          procCodeMap != null &&
+          typeof procCodeMap[code_num] === "string" &&
+          procCodeMap[code_num]) ||
+        null,
     };
 
     if (type === "CoInsurance") {

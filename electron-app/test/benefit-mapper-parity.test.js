@@ -120,11 +120,14 @@ function inlineMapper(rawBenefits, catMap) {
 }
 
 // Strips additive-only fields from a benefit-mapper.js entry so we can compare
-// against the pre-v2.3.64 inline output without false failures
+// against the pre-v2.3.64 inline output without false failures.
+// code_num/proc_code are Phase 6D-1 additive fields.
 function stripAdditive(entry) {
   const copy = { ...entry };
   delete copy.ebenefitcat;
   delete copy.category_source;
+  delete copy.code_num;
+  delete copy.proc_code;
   return copy;
 }
 
