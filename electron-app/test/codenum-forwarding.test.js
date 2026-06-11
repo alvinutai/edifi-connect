@@ -125,5 +125,37 @@ test("existing fields unchanged: additive contract holds", () => {
   assert.strictEqual(e.plan_num, 9001);
 });
 
+// ── 6D-1B review-fix additions ────────────────────────────────────────────────
+
+test("exact key set pinned for a mapped CoInsurance entry (additive contract, 6D-1B)", () => {
+  const [e] = mapBenefits([coins({ CodeNum: 87 })], null, PROC_MAP);
+  assert.deepStrictEqual(Object.keys(e).sort(), [
+    "benefit_num",
+    "category",
+    "category_source",
+    "code_num",
+    "cov_cat_num",
+    "coverage_level",
+    "ebenefitcat",
+    "pat_plan_num",
+    "percent",
+    "plan_num",
+    "proc_code",
+    "type",
+  ]);
+});
+
+test("string CodeNum normalizes to number and still resolves (6D-1B)", () => {
+  const [e] = mapBenefits([coins({ CodeNum: "87" })], null, PROC_MAP);
+  assert.strictEqual(e.code_num, 87);
+  assert.strictEqual(e.proc_code, "D1110");
+});
+
+test("empty-string proc-map value is rejected to null (6D-1B)", () => {
+  const [e] = mapBenefits([coins({ CodeNum: 87 })], null, { 87: "" });
+  assert.strictEqual(e.code_num, 87);
+  assert.strictEqual(e.proc_code, null);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

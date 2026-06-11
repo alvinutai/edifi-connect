@@ -3517,9 +3517,17 @@ async function getOdProcCodes() {
         if (p.CodeNum && p.ProcCode) map[p.CodeNum] = String(p.ProcCode);
       }
       odProcCodeCache = map;
-      log(
-        `[OD Benefits] ProcCode cache warmed: ${Object.keys(map).length} codes`,
-      );
+      const n = Object.keys(map).length;
+      log(`[OD Benefits] ProcCode cache warmed: ${n} codes`);
+      // 6D-1B review finding 3: OD REST list endpoints can cap responses
+      // (commonly 100). A count exactly at the cap means the catalog is
+      // probably truncated and most proc_code lookups will miss (fails safe:
+      // code_num still forwards). Pagination loop is the fix if this fires.
+      if (n === 100) {
+        log(
+          "[OD Benefits] WARNING: ProcCode count is exactly 100 — possible API pagination cap; catalog may be truncated",
+        );
+      }
       return map;
     }
   } catch (e) {
@@ -3665,6 +3673,7 @@ async function syncODData(syncDate = null) {
   }
 
   odCovCatCache = null; // refresh category map each sync — office may have added categories
+  odProcCodeCache = null; // 6D-1B: same lifetime — codes added in OD resolve without a restart
   const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
