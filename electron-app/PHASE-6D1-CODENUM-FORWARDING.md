@@ -54,8 +54,12 @@ is allowed until separately approved.
 ## 6D-3 packaging QA checklist (REQUIRED before any release)
 
 1. Confirm the target office runs the **Electron app runtime** (v2.3.x),
-   NOT the legacy `service/bridge.js` runtime. If the office is on the
-   service runtime: STOP and open a separate protected implementation gate.
+   NOT the legacy `service/bridge.js` runtime, AND verify from the office's
+   sync logs **which benefit path is actually active** (REST `/benefits` vs
+   MySQL fallback — `SYNC_OD_NOW` prefers MySQL when available). If the
+   office is on the service runtime, OR its benefits flow through the MySQL
+   path while the CATEGORY_MAP enum misalignment is unfixed: STOP and open
+   a separate protected gate before packaging/update.
 2. Verify the "ProcCode cache warmed: N codes" log on first sync — if N is
    exactly 100, the catalog is probably truncated by API pagination; add the
    Offset pagination loop before relying on proc_code coverage.
@@ -72,11 +76,25 @@ is allowed until separately approved.
 OD's actual enum (3→BASIC should be DIAGNOSTIC, 4→ENDO should be
 Restorative/BASIC, 5→PERIO should be ENDODONTIC, 6→ORAL_SURGERY should be
 PERIODONTIC, 7→MAXILLOFACIAL should be ORAL_SURGERY), and emits
-non-canonical labels (ENDO/PERIO/ORTHO/IMPLANTS). This only affects the
-MySQL FALLBACK path's legacy `category` label — the pilot office uses the
-REST path, and the backend's Phase 6B mapper resolves the forwarded raw
-`ebenefitcat` value correctly regardless. Fix needs its own small gate
-(canonical map + a decision on the intentional Prosth/Crowns→MAJOR rule).
+non-canonical labels (ENDO/PERIO/ORTHO/IMPLANTS).
+
+Two accuracy corrections from the 6D-2B re-review:
+
+1. **The backend does NOT fully self-heal these labels.** Its mapper trusts
+   any canonical-looking label first (rung 1, HIGH confidence) before the
+   row's raw `ebenefitcat` can correct it. The shifted values that happen to
+   land on canonical names (1→DIAGNOSTIC, 3→BASIC, 6→ORAL_SURGERY,
+   12→ADJUNCTIVE) are therefore trusted **mislabeled**. Only the
+   non-canonical labels (ENDO/PERIO/MAJOR/MAXILLOFACIAL/IMPLANTS) fall
+   through to the raw `ebenefitcat` and resolve truthfully.
+2. **Which sync path the pilot actually uses is UNVERIFIED.** Do not assume
+   REST: `SYNC_OD_NOW` prefers the MySQL path when MySQL is available, and
+   the pilot office has MySQL available. Until the office's real sync path
+   is verified from its logs, treat MySQL-path category labels as possibly
+   live in production data.
+
+Fix needs its own small gate (canonical map + a decision on the intentional
+Prosth/Crowns→MAJOR rule).
 
 ## Rollout boundaries
 
