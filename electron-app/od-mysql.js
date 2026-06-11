@@ -279,51 +279,53 @@ async function getBenefitsForPatient(patNum) {
       [PlanNum, PatPlanNum],
     );
 
-    return rows
-      .map((r) => {
-        const type = BENEFIT_TYPE[r.BenefitType];
-        if (!type) return null;
-
-        const category =
-          CATEGORY_MAP[r.EbenefitCat] || r.CategoryDesc || "GENERAL";
-        const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || "None";
-        const period = TIME_PERIOD[r.TimePeriod] || "None";
-
-        const benefit = {
-          type,
-          category,
-          coverage_level,
-          benefit_num: r.BenefitNum ?? null,
-          cov_cat_num: Number(r.CovCatNum) || 0,
-          ebenefitcat: Number(r.EbenefitCat ?? 0) || null,
-          code_num: Number(r.CodeNum) || null,
-          proc_code: typeof r.ProcCode === "string" && r.ProcCode ? r.ProcCode : null,
-        };
-        if (type === "CoInsurance") {
-          // Percent = what the plan pays (0-100). Skip -1 (not applicable).
-          const pct = Number(r.Percent);
-          if (isNaN(pct) || pct < 0) return null;
-          benefit.percent = pct;
-        } else if (type === "Deductible") {
-          benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
-        } else if (type === "Limitations") {
-          // Annual max: MonetaryAmt > 0, no Quantity qualifier
-          // Frequency rule: Quantity > 0 with a QuantityQualifier
-          if (Number(r.MonetaryAmt) > 0) {
-            benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
-          }
-          if (Number(r.Quantity) > 0 && Number(r.QuantityQualifier) > 0) {
-            benefit.quantity = r.Quantity;
-            benefit.period = period;
-            benefit.qualifier = r.QuantityQualifier;
-          }
-        }
-        return benefit;
-      })
-      .filter(Boolean);
+    return rows.map(mapMysqlBenefitRow).filter(Boolean);
   } catch {
     return [];
   }
+}
+
+// Pure row mapper for the MySQL benefit path — extracted for unit testing
+// (6D-1B review finding 7). Null-safe against LEFT JOIN misses: ProcCode
+// NULL/empty → null, CodeNum 0/NULL → null, string CodeNum normalized.
+function mapMysqlBenefitRow(r) {
+  const type = BENEFIT_TYPE[r.BenefitType];
+  if (!type) return null;
+
+  const category = CATEGORY_MAP[r.EbenefitCat] || r.CategoryDesc || "GENERAL";
+  const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || "None";
+  const period = TIME_PERIOD[r.TimePeriod] || "None";
+
+  const benefit = {
+    type,
+    category,
+    coverage_level,
+    benefit_num: r.BenefitNum ?? null,
+    cov_cat_num: Number(r.CovCatNum) || 0,
+    ebenefitcat: Number(r.EbenefitCat ?? 0) || null,
+    code_num: Number(r.CodeNum) || null,
+    proc_code: typeof r.ProcCode === "string" && r.ProcCode ? r.ProcCode : null,
+  };
+  if (type === "CoInsurance") {
+    // Percent = what the plan pays (0-100). Skip -1 (not applicable).
+    const pct = Number(r.Percent);
+    if (isNaN(pct) || pct < 0) return null;
+    benefit.percent = pct;
+  } else if (type === "Deductible") {
+    benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
+  } else if (type === "Limitations") {
+    // Annual max: MonetaryAmt > 0, no Quantity qualifier
+    // Frequency rule: Quantity > 0 with a QuantityQualifier
+    if (Number(r.MonetaryAmt) > 0) {
+      benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
+    }
+    if (Number(r.Quantity) > 0 && Number(r.QuantityQualifier) > 0) {
+      benefit.quantity = r.Quantity;
+      benefit.period = period;
+      benefit.qualifier = r.QuantityQualifier;
+    }
+  }
+  return benefit;
 }
 
 // ─── Patient Lookup by Name + DOB ─────────────────────────────────────────────
@@ -686,6 +688,7 @@ module.exports = {
   isAvailable,
   readOdConfig,
   getBenefitsForPatient,
+  mapMysqlBenefitRow,
   getPatNumByNameDOB,
   getAppointmentsForDate,
   getAppointmentsToday,
