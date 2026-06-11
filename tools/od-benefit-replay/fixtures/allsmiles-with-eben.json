@@ -1,0 +1,100 @@
+{
+  "description": "All Smiles MetLife — CovCatNum=0 but EbenefitCat present",
+  "covcat": [
+    { "CovCatNum": 1, "Description": "General", "EbenefitCat": 1 },
+    { "CovCatNum": 2, "Description": "Preventive", "EbenefitCat": 2 },
+    { "CovCatNum": 12, "Description": "Major", "EbenefitCat": 8 }
+  ],
+  "benefits": [
+    {
+      "BenefitNum": 201,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 2,
+      "Percent": "100",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 2
+    },
+    {
+      "BenefitNum": 202,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "100",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 2
+    },
+    {
+      "BenefitNum": 203,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 12,
+      "Percent": "90",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 8
+    },
+    {
+      "BenefitNum": 204,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "80",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 4
+    },
+    {
+      "BenefitNum": 205,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "80",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 5
+    },
+    {
+      "BenefitNum": 206,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 6
+    },
+    {
+      "BenefitNum": 207,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 7
+    },
+    {
+      "BenefitNum": 208,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 7,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 8
+    },
+    {
+      "BenefitNum": 209,
+      "PlanNum": 9002,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 0,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 8
+    }
+  ]
+}

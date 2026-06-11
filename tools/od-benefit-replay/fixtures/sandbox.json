@@ -1,0 +1,94 @@
+{
+  "description": "Sandbox plan — CovCatNum correctly maps all categories",
+  "covcat": [
+    { "CovCatNum": 2, "Description": "Preventive", "EbenefitCat": 2 },
+    { "CovCatNum": 3, "Description": "Restorative", "EbenefitCat": 4 },
+    { "CovCatNum": 4, "Description": "Endodontics", "EbenefitCat": 5 },
+    { "CovCatNum": 5, "Description": "Periodontics", "EbenefitCat": 6 },
+    { "CovCatNum": 6, "Description": "Oral Surgery", "EbenefitCat": 7 },
+    { "CovCatNum": 7, "Description": "Prosthodontics", "EbenefitCat": 8 },
+    { "CovCatNum": 8, "Description": "Major", "EbenefitCat": 0 }
+  ],
+  "benefits": [
+    {
+      "BenefitNum": 101,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 2,
+      "Percent": "100",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 2
+    },
+    {
+      "BenefitNum": 102,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 3,
+      "Percent": "80",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 4
+    },
+    {
+      "BenefitNum": 103,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 4,
+      "Percent": "80",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 5
+    },
+    {
+      "BenefitNum": 104,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 5,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 6
+    },
+    {
+      "BenefitNum": 105,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 6,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 7
+    },
+    {
+      "BenefitNum": 106,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 7,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 8
+    },
+    {
+      "BenefitNum": 108,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 1,
+      "CovCatNum": 8,
+      "Percent": "50",
+      "CoverageLevel": "Individual",
+      "EbenefitCat": 0
+    },
+    {
+      "BenefitNum": 107,
+      "PlanNum": 9001,
+      "PatPlanNum": 0,
+      "BenefitType": 3,
+      "CovCatNum": 2,
+      "Quantity": 2,
+      "TimePeriod": 2,
+      "CoverageLevel": "None"
+    }
+  ]
+}
