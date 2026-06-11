@@ -3,8 +3,8 @@
  *
  * Proves:
  *   T-Sandbox        : well-configured plan produces all key categories via CovCatNum
- *   T-AllSmiles-WithEben : CovCatNum=0 + EbenefitCat present → BASIC/ENDO/PERIO appear
- *   T-AllSmiles-NoEben   : CovCatNum=0 + EbenefitCat absent → those rows stay GENERAL
+ *   T-PilotOffice-WithEben : CovCatNum=0 + EbenefitCat present → BASIC/ENDO/PERIO appear
+ *   T-PilotOffice-NoEben   : CovCatNum=0 + EbenefitCat absent → those rows stay GENERAL
  *   T-EbenFallback       : CovCatNum=0 + EbenefitCat=4 → BASIC (v2.3.64 path works)
  *   T-NoEbenFallback     : CovCatNum=0 + EbenefitCat absent → GENERAL (field is required)
  *
@@ -92,42 +92,42 @@ console.log("\nT-Sandbox: sandbox plan with correct CovCatNum mappings");
   });
 }
 
-// --- T-AllSmiles-WithEben ---
+// --- T-PilotOffice-WithEben ---
 console.log(
-  "\nT-AllSmiles-WithEben: MetLife pattern — CovCatNum=0 but EbenefitCat present",
+  "\nT-PilotOffice-WithEben: Carrier A pattern — CovCatNum=0 but EbenefitCat present",
 );
 {
-  const f = loadFixture("allsmiles-with-eben.json");
+  const f = loadFixture("pilot-office-with-eben.json");
   const matrix = coverageMatrix(f);
   const cats = new Set(matrix.map((r) => r.category));
   const ebenRows = matrix.filter((r) => r.category_source === "EbenefitCat");
 
-  test("T-AllSmiles-WithEben: BASIC present", () =>
+  test("T-PilotOffice-WithEben: BASIC present", () =>
     assert.ok(
       cats.has("BASIC"),
       "BASIC missing — EbenefitCat=4 should resolve",
     ));
-  test("T-AllSmiles-WithEben: ENDODONTIC present", () =>
+  test("T-PilotOffice-WithEben: ENDODONTIC present", () =>
     assert.ok(
       cats.has("ENDODONTIC"),
       "ENDODONTIC missing — EbenefitCat=5 should resolve",
     ));
-  test("T-AllSmiles-WithEben: PERIODONTIC present", () =>
+  test("T-PilotOffice-WithEben: PERIODONTIC present", () =>
     assert.ok(
       cats.has("PERIODONTIC"),
       "PERIODONTIC missing — EbenefitCat=6 should resolve",
     ));
-  test("T-AllSmiles-WithEben: ORAL_SURGERY present", () =>
+  test("T-PilotOffice-WithEben: ORAL_SURGERY present", () =>
     assert.ok(
       cats.has("ORAL_SURGERY"),
       "ORAL_SURGERY missing — EbenefitCat=7 should resolve",
     ));
-  test("T-AllSmiles-WithEben: at least one EbenefitCat-sourced row", () =>
+  test("T-PilotOffice-WithEben: at least one EbenefitCat-sourced row", () =>
     assert.ok(
       ebenRows.length > 0,
       "no EbenefitCat rows — v2.3.64 path not triggered",
     ));
-  test("T-AllSmiles-WithEben: GENERAL count is 0 for named key categories", () => {
+  test("T-PilotOffice-WithEben: GENERAL count is 0 for named key categories", () => {
     const generalCount = matrix.filter((r) => r.category === "GENERAL").length;
     assert.strictEqual(
       generalCount,
@@ -137,36 +137,36 @@ console.log(
   });
 }
 
-// --- T-AllSmiles-NoEben ---
+// --- T-PilotOffice-NoEben ---
 console.log(
-  "\nT-AllSmiles-NoEben: MetLife pattern — CovCatNum=0, EbenefitCat ABSENT",
+  "\nT-PilotOffice-NoEben: Carrier A pattern — CovCatNum=0, EbenefitCat ABSENT",
 );
 {
-  const f = loadFixture("allsmiles-no-eben.json");
+  const f = loadFixture("pilot-office-no-eben.json");
   const matrix = coverageMatrix(f);
   const cats = new Set(matrix.map((r) => r.category));
 
-  test("T-AllSmiles-NoEben: BASIC absent (stuck at GENERAL)", () =>
+  test("T-PilotOffice-NoEben: BASIC absent (stuck at GENERAL)", () =>
     assert.ok(
       !cats.has("BASIC"),
       "BASIC appeared without EbenefitCat — unexpected",
     ));
-  test("T-AllSmiles-NoEben: ENDODONTIC absent (stuck at GENERAL)", () =>
+  test("T-PilotOffice-NoEben: ENDODONTIC absent (stuck at GENERAL)", () =>
     assert.ok(
       !cats.has("ENDODONTIC"),
       "ENDODONTIC appeared without EbenefitCat — unexpected",
     ));
-  test("T-AllSmiles-NoEben: PERIODONTIC absent (stuck at GENERAL)", () =>
+  test("T-PilotOffice-NoEben: PERIODONTIC absent (stuck at GENERAL)", () =>
     assert.ok(
       !cats.has("PERIODONTIC"),
       "PERIODONTIC appeared without EbenefitCat — unexpected",
     ));
-  test("T-AllSmiles-NoEben: GENERAL present (unmapped rows accumulate here)", () =>
+  test("T-PilotOffice-NoEben: GENERAL present (unmapped rows accumulate here)", () =>
     assert.ok(
       cats.has("GENERAL"),
       "expected GENERAL to be present for CovCatNum=0 rows",
     ));
-  test("T-AllSmiles-NoEben: no EbenefitCat-sourced rows", () => {
+  test("T-PilotOffice-NoEben: no EbenefitCat-sourced rows", () => {
     const ebenRows = matrix.filter((r) => r.category_source === "EbenefitCat");
     assert.strictEqual(
       ebenRows.length,
@@ -229,10 +229,10 @@ console.log("\nT-NoEbenFallback: CovCatNum=0 + EbenefitCat absent → GENERAL");
 
 // --- T-CodeNum (Phase 6D-1) ---
 console.log(
-  "\nT-CodeNum: All Smiles shape + CodeNum forwarding — UNMAPPED→mappable conversion",
+  "\nT-CodeNum: Pilot Office shape + CodeNum forwarding — UNMAPPED→mappable conversion",
 );
 {
-  const f = loadFixture("allsmiles-codenum.json");
+  const f = loadFixture("pilot-office-codenum.json");
   const catMap = buildCatMap(f.covcat);
   const mapped = mapBenefits(f.benefits, catMap, f.proccodes);
   const coin = mapped.filter((r) => r.type === "CoInsurance");

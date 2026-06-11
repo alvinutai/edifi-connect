@@ -5,8 +5,8 @@
  *
  * Usage (from C:\Users\elite\edifi-connect\):
  *   node tools/od-benefit-replay/runner.js fixtures/sandbox.json
- *   node tools/od-benefit-replay/runner.js fixtures/allsmiles-with-eben.json
- *   node tools/od-benefit-replay/runner.js fixtures/allsmiles-no-eben.json
+ *   node tools/od-benefit-replay/runner.js fixtures/pilot-office-with-eben.json
+ *   node tools/od-benefit-replay/runner.js fixtures/pilot-office-no-eben.json
  *   node tools/od-benefit-replay/runner.js   (runs all 3)
  */
 
@@ -45,7 +45,11 @@ function runFixture(fixturePath) {
   const fixture = JSON.parse(fs.readFileSync(absPath, "utf8"));
   const catMap = buildCatMap(fixture.covcat);
   // Phase 6D-1: fixtures may carry a CodeNum → CDT map (proccodes)
-  const mapped = mapBenefits(fixture.benefits, catMap, fixture.proccodes ?? null);
+  const mapped = mapBenefits(
+    fixture.benefits,
+    catMap,
+    fixture.proccodes ?? null,
+  );
   const matrix = buildCoverageMatrix(mapped);
 
   const categories = new Set(matrix.map((r) => r.category));
@@ -109,8 +113,8 @@ function main() {
   } else {
     const all = [
       "sandbox.json",
-      "allsmiles-with-eben.json",
-      "allsmiles-no-eben.json",
+      "pilot-office-with-eben.json",
+      "pilot-office-no-eben.json",
     ];
     for (const f of all) runFixture(f);
   }
