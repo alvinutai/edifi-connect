@@ -1,4 +1,4 @@
-﻿// EDiFi Connect Bridge Service — headless Node.js, no Electron
+// EDiFi Connect Bridge Service — headless Node.js, no Electron
 const path = require("path");
 const fs = require("fs");
 const express = require("express");
@@ -10,6 +10,7 @@ const {
   getBenefitsForPatient,
   getPatNumByNameDOB,
   getAppointmentsForDate,
+  getAppointmentsForDates,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
@@ -39,6 +40,12 @@ const {
   sanitizePatientPlanRestRow,
   sanitizePatientPlanMysqlRow,
 } = require("../electron-app/lib/od-plan-nums");
+const {
+  DEFAULT_LOOKAHEAD_DAYS,
+  resolveOfficeTimezone,
+  getAppointmentDateWindow,
+  getOfficeLocalDateISO,
+} = require("../electron-app/lib/appointment-window");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -89,6 +96,12 @@ let config = {
   // OD MySQL write-path credentials — set via SET_MYSQL_CONFIG remote command.
   // Stored in config.json on the local machine only. Never transmitted in logs.
   od_mysql: null,
+  // Office-local IANA timezone (e.g., "America/Denver"). If unset, UTC is used
+  // as a safe fallback. Set via local config; never transmitted as raw PHI.
+  office_timezone: null,
+  // How many days beyond today to sync appointments for proactive readiness.
+  // 0 = today only (backward compatible). Default 2 = today + tomorrow + day+2.
+  appointment_sync_lookahead_days: DEFAULT_LOOKAHEAD_DAYS,
 };
 
 // ─── Remote control state (never contains credentials or PHI) ─────────────────
@@ -356,13 +369,37 @@ function getMachineIdHash() {
 }
 
 function getSafeConfigStatus() {
+  const tzResolution = resolveOfficeTimezone(config.office_timezone);
   return {
     office_id_present: !!config.office_id,
     od_mysql_config_present: false, // set below after mysql check
     od_api_url_present: !!config.od_api_url,
     portal_sessions_count: activeSessions().length,
     has_bridge_url: !!EDIFI_CLOUD_WS,
+    office_timezone_source: tzResolution.source,
+    office_timezone_valid: tzResolution.source === "config",
   };
+}
+
+/**
+ * Validate office_timezone config and emit a loud warning if we fall back to UTC.
+ * Called once at startup and before each appointment sync window computation.
+ * Returns the resolved timezone object for convenience.
+ */
+function validateOfficeTimezoneConfig() {
+  const resolution = resolveOfficeTimezone(config.office_timezone);
+  if (resolution.source === "utc_fallback") {
+    log(
+      `[Timezone] WARNING: office_timezone is missing or invalid (${JSON.stringify(config.office_timezone)}). ` +
+        `Falling back to UTC. Appointment sync may use the wrong calendar date for offices far from UTC. ` +
+        `Set office_timezone in config.json to the office IANA timezone (e.g., "America/Denver").`,
+    );
+  } else {
+    log(
+      `[Timezone] Using office timezone: ${resolution.timezone} (source: ${resolution.source})`,
+    );
+  }
+  return resolution;
 }
 
 async function sendAgentHello() {
@@ -3466,8 +3503,43 @@ async function syncODData(syncDate = null) {
     return;
   }
 
-  odCovCatCache = null; // refresh category map each sync
-  const today = syncDate ?? new Date().toISOString().split("T")[0];
+  const tzResolution = validateOfficeTimezoneConfig();
+  const tz = tzResolution.timezone;
+  const windowLookaheadDays = syncDate
+    ? 0
+    : (config.appointment_sync_lookahead_days ?? DEFAULT_LOOKAHEAD_DAYS);
+  const dates = syncDate
+    ? [syncDate]
+    : getAppointmentDateWindow(tz, windowLookaheadDays, new Date());
+
+  log(
+    `[OD Sync] Window: ${dates.join(", ")} (lookahead=${windowLookaheadDays}, tz=${tz}, source=${tzResolution.source})`,
+  );
+
+  // Refresh caches once for the whole window.
+  odCovCatCache = null;
+
+  const perDateDiagnostics = [];
+  for (const date of dates) {
+    await syncODDataForDate(date);
+    if (od_sync_status.last_diagnostic) {
+      perDateDiagnostics.push({ ...od_sync_status.last_diagnostic });
+    }
+  }
+
+  od_sync_status.last_diagnostic = {
+    dates_used: dates,
+    per_date_diagnostics: perDateDiagnostics,
+  };
+}
+
+async function syncODDataForDate(today) {
+  if (!config.od_api_url || !config.office_id) return;
+  if (!tunnelOk || !tunnel) {
+    log("[OD Sync] Skipped — tunnel not connected");
+    return;
+  }
+
   log(`[OD Sync] Starting for ${today}...`);
 
   const endpoint = `/appointments?date=${today}`;
@@ -3783,19 +3855,52 @@ async function syncODMySql(syncDate) {
     return;
   }
 
-  const targetDate = syncDate || new Date().toISOString().slice(0, 10);
+  const tzResolution = validateOfficeTimezoneConfig();
+  const tz = tzResolution.timezone;
+  const windowLookaheadDays = syncDate
+    ? 0
+    : (config.appointment_sync_lookahead_days ?? DEFAULT_LOOKAHEAD_DAYS);
+  const dates = syncDate
+    ? [syncDate]
+    : getAppointmentDateWindow(tz, windowLookaheadDays, new Date());
+
   od_sync_status.last_attempt_at = new Date().toISOString();
-  log(`[OD MySQL Sync] Starting direct MySQL sync for ${targetDate}...`);
+  log(
+    `[OD MySQL Sync] Window: ${dates.join(", ")} (lookahead=${windowLookaheadDays}, tz=${tz}, source=${tzResolution.source})`,
+  );
+
   try {
-    const apts = await getAppointmentsForDate(targetDate);
-    if (apts.length === 0) {
-      log(`[OD MySQL Sync] No scheduled appointments for ${targetDate}`);
+    const allApts = await getAppointmentsForDates(dates);
+    if (allApts.length === 0) {
+      log(`[OD MySQL Sync] No scheduled appointments for window`);
       return;
     }
 
-    log(
-      `[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`,
-    );
+    // Group by MySQL date so we can emit one OD_DATA_PUSH per date.
+    const aptsByDate = new Map();
+    for (const apt of allApts) {
+      const aptDate =
+        apt.apt_date || getOfficeLocalDateISO(tz, new Date(apt.AptDateTime));
+      if (!aptsByDate.has(aptDate)) aptsByDate.set(aptDate, []);
+      aptsByDate.get(aptDate).push(apt);
+    }
+
+    for (const date of dates) {
+      const apts = aptsByDate.get(date) || [];
+      if (apts.length === 0) continue;
+      await syncODMySqlForDate(date, apts);
+    }
+  } catch (e) {
+    od_sync_status.last_error = e.message.slice(0, 200);
+    log(`[OD MySQL Sync] Error: ${e.message}`);
+  }
+}
+
+async function syncODMySqlForDate(targetDate, apts) {
+  log(
+    `[OD MySQL Sync] ${apts.length} appointments for ${targetDate} — pulling insurance snapshots...`,
+  );
+  try {
     const enriched = [];
     for (const apt of apts) {
       try {
@@ -4735,6 +4840,10 @@ const configDir = path.join(
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
 loadConfig();
+
+// Validate office timezone early and loudly. UTC fallback is safe but wrong
+// for most offices, so we surface it in logs and safe_config_status.
+validateOfficeTimezoneConfig();
 
 if (!config.registered || !config.office_id) {
   log(

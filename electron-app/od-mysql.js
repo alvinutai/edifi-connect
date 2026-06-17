@@ -419,6 +419,29 @@ async function getAppointmentsForDate(date) {
   }
 }
 
+async function getAppointmentsForDates(dates) {
+  const p = await getPool();
+  if (!p || !Array.isArray(dates) || dates.length === 0) return [];
+  try {
+    const [rows] = await p.query(
+      `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              DATE(a.AptDateTime) AS apt_date,
+              p.FName, p.LName, p.Birthdate,
+              p.HmPhone, p.WkPhone, p.Email
+       FROM appointment a
+       JOIN patient p ON p.PatNum = a.PatNum
+       WHERE DATE(a.AptDateTime) IN (?)
+         AND a.AptStatus IN (1, 2)
+       ORDER BY a.AptDateTime`,
+      [dates],
+    );
+    return rows;
+  } catch (e) {
+    logger(`getAppointmentsForDates error (${dates.join(",")}): ${e.message}`);
+    return [];
+  }
+}
+
 // Backward-compatible wrapper
 async function getAppointmentsToday() {
   return getAppointmentsForDate(null);
@@ -691,6 +714,7 @@ module.exports = {
   mapMysqlBenefitRow,
   getPatNumByNameDOB,
   getAppointmentsForDate,
+  getAppointmentsForDates,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
