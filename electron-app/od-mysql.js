@@ -75,6 +75,7 @@ const COVERAGE_LEVEL = { 0: "None", 1: "Individual", 3: "Family" };
 let pool = null;
 let configCache = null;
 let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
+let codeGroupAvailable = null; // cached CodeGroup capability probe — invalidated on reconnect
 let available = null; // null = unknown, true/false = tested
 let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
 let manualConfigOverride = null; // set by SET_MYSQL_CONFIG command — bypasses file scan
@@ -92,6 +93,7 @@ function setManualMysqlConfig(cfg) {
   available = null;
   pool = null;
   covCatCache = null;
+  codeGroupAvailable = null;
   logger(`Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`);
 }
 
@@ -102,6 +104,7 @@ setInterval(
       available = null;
       pool = null;
       covCatCache = null;
+      codeGroupAvailable = null;
     }
   },
   5 * 60 * 1000,
@@ -220,6 +223,45 @@ async function isAvailable() {
   return available;
 }
 
+// ─── CodeGroup Capability Probe ───────────────────────────────────────────────
+// Read-only probe: determines whether this OD database has the CodeGroupNum
+// column on benefit and a codegroup table. Cached per session; failures are
+// treated as "not available" so older schemas fall back safely.
+
+async function probeCodeGroupSupport() {
+  if (codeGroupAvailable !== null) return codeGroupAvailable;
+  const p = await getPool();
+  if (!p) {
+    codeGroupAvailable = false;
+    return false;
+  }
+  try {
+    const [[colRow]] = await p.query(
+      `SELECT COUNT(*) AS cnt
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'benefit'
+         AND COLUMN_NAME = 'CodeGroupNum'`,
+    );
+    const [[tableRow]] = await p.query(
+      `SELECT COUNT(*) AS cnt
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'codegroup'`,
+    );
+    codeGroupAvailable =
+      Number(colRow?.cnt || 0) > 0 && Number(tableRow?.cnt || 0) > 0;
+    logger(
+      `CodeGroup support probe: ${codeGroupAvailable ? "available" : "unavailable"}`,
+    );
+    return codeGroupAvailable;
+  } catch (e) {
+    logger(`CodeGroup support probe failed: ${e.message}`);
+    codeGroupAvailable = false;
+    return false;
+  }
+}
+
 // ─── Patient Plan Lookup ──────────────────────────────────────────────────────
 
 async function getPatientPlanInfo(patNum) {
@@ -252,30 +294,59 @@ async function getBenefitsForPatient(patNum) {
   const { PlanNum, PatPlanNum } = planInfo;
 
   try {
+    // Phase 6E-1: CodeGroup identity forwarding. Probe the schema once per
+    // session; if the CodeGroupNum column / codegroup table are absent, fall
+    // back to the previous SELECT so older OD schemas still return benefits.
+    const hasCodeGroup = await probeCodeGroupSupport();
+
     // Phase 6D-1: BenefitNum/CovCatNum/CodeNum + procedurecode join added for
     // parity with the REST path. LEFT JOINs are null-safe — rows without a
     // procedure linkage (CodeNum=0) simply carry nulls.
     const [rows] = await p.query(
-      `SELECT
-         b.BenefitNum,
-         b.CovCatNum,
-         b.CodeNum,
-         b.BenefitType,
-         b.CoverageLevel,
-         b.Percent,
-         b.MonetaryAmt,
-         b.Quantity,
-         b.QuantityQualifier,
-         b.TimePeriod,
-         cc.Description AS CategoryDesc,
-         cc.EbenefitCat,
-         pc.ProcCode
-       FROM benefit b
-       LEFT JOIN covcat cc ON cc.CovCatNum = b.CovCatNum
-       LEFT JOIN procedurecode pc ON pc.CodeNum = b.CodeNum
-       WHERE (b.PlanNum = ? AND b.PatPlanNum = 0)
-          OR b.PatPlanNum = ?
-       ORDER BY b.BenefitType, cc.EbenefitCat`,
+      hasCodeGroup
+        ? `SELECT
+             b.BenefitNum,
+             b.CovCatNum,
+             b.CodeNum,
+             b.CodeGroupNum,
+             b.BenefitType,
+             b.CoverageLevel,
+             b.Percent,
+             b.MonetaryAmt,
+             b.Quantity,
+             b.QuantityQualifier,
+             b.TimePeriod,
+             cc.Description AS CategoryDesc,
+             cc.EbenefitCat,
+             pc.ProcCode,
+             cg.GroupName AS CodeGroupDesc
+           FROM benefit b
+           LEFT JOIN covcat cc ON cc.CovCatNum = b.CovCatNum
+           LEFT JOIN procedurecode pc ON pc.CodeNum = b.CodeNum
+           LEFT JOIN codegroup cg ON cg.CodeGroupNum = b.CodeGroupNum
+           WHERE (b.PlanNum = ? AND b.PatPlanNum = 0)
+              OR b.PatPlanNum = ?
+           ORDER BY b.BenefitType, cc.EbenefitCat`
+        : `SELECT
+             b.BenefitNum,
+             b.CovCatNum,
+             b.CodeNum,
+             b.BenefitType,
+             b.CoverageLevel,
+             b.Percent,
+             b.MonetaryAmt,
+             b.Quantity,
+             b.QuantityQualifier,
+             b.TimePeriod,
+             cc.Description AS CategoryDesc,
+             cc.EbenefitCat,
+             pc.ProcCode
+           FROM benefit b
+           LEFT JOIN covcat cc ON cc.CovCatNum = b.CovCatNum
+           LEFT JOIN procedurecode pc ON pc.CodeNum = b.CodeNum
+           WHERE (b.PlanNum = ? AND b.PatPlanNum = 0)
+              OR b.PatPlanNum = ?
+           ORDER BY b.BenefitType, cc.EbenefitCat`,
       [PlanNum, PatPlanNum],
     );
 
@@ -305,6 +376,11 @@ function mapMysqlBenefitRow(r) {
     ebenefitcat: Number(r.EbenefitCat ?? 0) || null,
     code_num: Number(r.CodeNum) || null,
     proc_code: typeof r.ProcCode === "string" && r.ProcCode ? r.ProcCode : null,
+    code_group_num: Number(r.CodeGroupNum) || null,
+    code_group_desc:
+      typeof r.CodeGroupDesc === "string" && r.CodeGroupDesc
+        ? r.CodeGroupDesc
+        : null,
   };
   if (type === "CoInsurance") {
     // Percent = what the plan pays (0-100). Skip -1 (not applicable).
@@ -712,6 +788,7 @@ module.exports = {
   readOdConfig,
   getBenefitsForPatient,
   mapMysqlBenefitRow,
+  probeCodeGroupSupport,
   getPatNumByNameDOB,
   getAppointmentsForDate,
   getAppointmentsForDates,
