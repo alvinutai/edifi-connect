@@ -1,6 +1,7 @@
 /**
- * Phase 6D-1B — MySQL benefit row mapper tests. Pure function, synthetic rows,
- * no database connection. Run: node test/mysql-benefit-row.test.js
+ * Phase 6E-1 — MySQL benefit row mapper tests (CodeGroup identity forwarding).
+ * Pure function, synthetic rows, no database connection.
+ * Run: node test/mysql-benefit-row.test.js
  */
 
 const assert = require("assert");
@@ -37,7 +38,7 @@ const row = (over = {}) => ({
   ...over,
 });
 
-console.log("\nPhase 6D-1B MySQL benefit row mapper");
+console.log("\nPhase 6E-1 MySQL benefit row mapper");
 
 test("full row maps with code_num and proc_code", () => {
   const b = mapMysqlBenefitRow(row());
@@ -111,6 +112,83 @@ test("ebenefitcat passes through verbatim alongside the new fields", () => {
     row({ EbenefitCat: 6, CodeNum: 0, ProcCode: null }),
   );
   assert.strictEqual(b.ebenefitcat, 6);
+});
+
+// ── 6E-1 CodeGroup identity forwarding additions ───────────────────────────────
+
+test("Limitations row with CodeGroupNum > 0 and CodeNum=0 emits code_group fields", () => {
+  const b = mapMysqlBenefitRow(
+    row({
+      BenefitType: 3,
+      Percent: null,
+      Quantity: 2,
+      QuantityQualifier: 2,
+      TimePeriod: 2,
+      CodeNum: 0,
+      ProcCode: null,
+      CodeGroupNum: 42,
+      CodeGroupDesc: "Exams / Bitewings",
+    }),
+  );
+  assert.strictEqual(b.type, "Limitations");
+  assert.strictEqual(b.code_num, null);
+  assert.strictEqual(b.proc_code, null);
+  assert.strictEqual(b.code_group_num, 42);
+  assert.strictEqual(b.code_group_desc, "Exams / Bitewings");
+  assert.strictEqual(b.quantity, 2);
+  assert.strictEqual(b.period, "CalendarYear");
+});
+
+test("CoInsurance output unchanged when CodeGroup fields are absent", () => {
+  const b = mapMysqlBenefitRow(row({ BenefitType: 1, Percent: "80" }));
+  assert.strictEqual(b.type, "CoInsurance");
+  assert.strictEqual(b.percent, 80);
+  assert.strictEqual(b.code_num, 87);
+  assert.strictEqual(b.proc_code, "D1110");
+  assert.strictEqual(b.code_group_num, null);
+  assert.strictEqual(b.code_group_desc, null);
+});
+
+test("missing CodeGroup columns fall back safely with code_group fields null", () => {
+  // Simulates the fallback SELECT path (older OD schema without CodeGroupNum).
+  const b = mapMysqlBenefitRow(
+    row({ CodeGroupNum: undefined, CodeGroupDesc: undefined }),
+  );
+  assert.strictEqual(b.code_group_num, null);
+  assert.strictEqual(b.code_group_desc, null);
+});
+
+test("empty CodeGroupDesc becomes null", () => {
+  const b = mapMysqlBenefitRow(
+    row({ CodeGroupNum: 7, CodeGroupDesc: "" }),
+  );
+  assert.strictEqual(b.code_group_num, 7);
+  assert.strictEqual(b.code_group_desc, null);
+});
+
+test("CodeGroupNum=0 becomes null", () => {
+  const b = mapMysqlBenefitRow(
+    row({ CodeGroupNum: 0, CodeGroupDesc: "Crowns" }),
+  );
+  assert.strictEqual(b.code_group_num, null);
+  assert.strictEqual(b.code_group_desc, "Crowns");
+});
+
+test("exact key set pinned for a mapped CoInsurance entry (additive contract, 6E-1)", () => {
+  const b = mapMysqlBenefitRow(row({ CodeGroupNum: 5, CodeGroupDesc: "Implants" }));
+  assert.deepStrictEqual(Object.keys(b).sort(), [
+    "benefit_num",
+    "category",
+    "code_group_desc",
+    "code_group_num",
+    "code_num",
+    "cov_cat_num",
+    "coverage_level",
+    "ebenefitcat",
+    "percent",
+    "proc_code",
+    "type",
+  ]);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
