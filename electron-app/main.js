@@ -91,6 +91,7 @@ let config = {
 const update_status = {
   checking: false,
   available: false,
+  downloading: false,
   downloaded: false,
   last_check_at: null,
   last_download_at: null,
@@ -806,12 +807,34 @@ async function handleDownloadUpdate(commandId) {
     );
     return;
   }
-  // autoDownload is true — download is already in progress or will start automatically
-  sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
-    download_in_progress: true,
-    note: "autoDownload is enabled; download will complete in background",
-    current_version: app.getVersion(),
-  });
+  if (update_status.downloading) {
+    sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
+      download_in_progress: true,
+      current_version: app.getVersion(),
+    });
+    return;
+  }
+  try {
+    update_status.downloading = true;
+    update_status.last_error = null;
+    await autoUpdater.downloadUpdate();
+    // download-update event handler will set downloaded=true when complete.
+    sendCommandResult(commandId, "DOWNLOAD_UPDATE", "COMPLETED", {
+      download_started: true,
+      current_version: app.getVersion(),
+    });
+  } catch (e) {
+    update_status.downloading = false;
+    update_status.last_error = e.message.slice(0, 200);
+    sendCommandResult(
+      commandId,
+      "DOWNLOAD_UPDATE",
+      "FAILED",
+      null,
+      "UPDATE_DOWNLOAD_ERROR",
+      e.message.slice(0, 200),
+    );
+  }
 }
 
 // ── SYNC_OD_NOW ───────────────────────────────────────────────────────────────
@@ -5063,11 +5086,11 @@ app.whenReady().then(() => {
   // If manual MySQL config was persisted by a prior SET_MYSQL_CONFIG command, apply it now.
   if (config.od_mysql) setManualMysqlConfig(config.od_mysql);
 
-  // Silent auto-update — checks GitHub on startup, downloads + installs with no user prompt.
-  // Every future update after v2.3.0 is completely invisible to office staff.
+  // Updater gating — silent check on startup, but download/install only on
+  // explicit remote commands (DOWNLOAD_UPDATE / QUIT_AND_INSTALL).
   try {
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on("checking-for-update", () => {
       update_status.checking = true;
       update_status.last_check_at = new Date().toISOString();
@@ -5081,21 +5104,18 @@ app.whenReady().then(() => {
       update_status.available = false;
     });
     autoUpdater.on("download-progress", () => {
-      // download in progress — no-op, downloaded remains false
+      // download in progress — no-op, downloaded remains false until completion
     });
     autoUpdater.on("update-downloaded", () => {
       update_status.downloaded = true;
+      update_status.downloading = false;
       update_status.last_download_at = new Date().toISOString();
       update_status.last_error = null;
-      log("[Updater] Update downloaded — auto-installing in 10 seconds");
-      // Auto-install 10 seconds after download — no manual trigger needed
-      setTimeout(() => {
-        log("[Updater] Auto-installing update now");
-        autoUpdater.quitAndInstall(true, true);
-      }, 10_000);
+      log("[Updater] Update downloaded — awaiting QUIT_AND_INSTALL command");
     });
     autoUpdater.on("error", (err) => {
       update_status.checking = false;
+      update_status.downloading = false;
       update_status.last_error = err.message.slice(0, 200);
       log(`[Updater] ${err.message}`);
     });
@@ -5130,21 +5150,23 @@ app.whenReady().then(() => {
 
   log(`EDiFi Connect started v${app.getVersion()}`);
 
-  // Second auto-update block — registers additional listeners and re-checks on app ready.
+  // Second updater block — tray/error listeners only. No duplicate startup check
+  // and no auto-install; install happens only via explicit QUIT_AND_INSTALL command.
   try {
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
     autoUpdater.on("update-downloaded", () => {
       update_status.downloaded = true;
+      update_status.downloading = false;
       update_status.last_download_at = new Date().toISOString();
-      log("[Update] New version downloaded — will install on next restart");
+      log("[Update] Update downloaded — awaiting QUIT_AND_INSTALL command");
       updateTray();
     });
     autoUpdater.on("error", (err) => {
+      update_status.downloading = false;
       update_status.last_error = err.message.slice(0, 200);
       log(`[Update] ${err.message}`);
     });
-    autoUpdater.checkForUpdates().catch(() => {});
   } catch (e) {
     log(`[Update] electron-updater not available: ${e.message}`);
   }
