@@ -72,20 +72,12 @@
   ; ── 3. Create v2.3.7 config directory ────────────────────────────────────────
   CreateDirectory "$APPDATA\EDiFi Connect"
 
-  ; ── 4. Pre-bake All Smiles office config ─────────────────────────────────────
-  ; v2.3.7 reads config from %APPDATA%\EDiFi Connect\config.json.
-  ; v1.0.0 config was at %APPDATA%\EDiFiConnect\config.json (no migration logic).
-  ; Without this pre-bake, the app starts as unregistered and shows a manual setup
-  ; screen where staff must enter the office code — unnecessary friction.
-  ;
-  ; Skip if config already exists — preserves any existing v2.3.7 configuration.
-  IfFileExists "$APPDATA\EDiFi Connect\config.json" EDiFiInstallSkipConfig EDiFiInstallWriteConfig
-
-  EDiFiInstallWriteConfig:
-    FileOpen $0 "$APPDATA\EDiFi Connect\config.json" w
-    FileWrite $0 '{"office_id":"90c1b75a-9bf1-4c9c-84fe-ccd7e9ba1ed9","registered":true,"api_key":null,"od_api_url":null,"od_customer_key":null,"machine_id":null}'
-    FileClose $0
-
-  EDiFiInstallSkipConfig:
+  ; ── 4. Office registration ───────────────────────────────────────────────────
+  ; No office config is pre-baked. A fresh install starts unregistered and the app
+  ; shows the setup screen for the office to enter its own code. This removes the
+  ; v2.3.x landmine where every fresh machine pre-registered as one hardcoded
+  ; office_id. The installer never writes or overwrites
+  ; %APPDATA%\EDiFi Connect\config.json, so in-place upgrades keep their existing
+  ; registration untouched.
 
 !macroend
