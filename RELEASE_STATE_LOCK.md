@@ -1,5 +1,11 @@
 # EDiFi Connect v2.3.14 — Release State Lock
 
+> ⚠️ **HAZARD — 2026-06-23**: This lock describes v2.3.14, which has ungated auto-update behavior (`autoDownload=true`, `autoInstallOnAppQuit=true`). That behavior can strand offices. Do not run `CHECK_FOR_UPDATE` on offices until they are on a version containing commit `e2a38e3` or later. See `EDIFI_TRUTH_REGISTRY.md` for current branches.
+>
+> **Current Connect branches:**
+> - `release/connect-2.3.71` @ `6ef5516` — **BROKEN BUILD, DO NOT RELEASE**
+> - `hotfix/connect-2.3.72-updater-gating` @ `2e64596` — next candidate
+
 **Locked:** 2026-05-27  
 **Status: RELEASED — Latest on GitHub. Auto-update active.**
 
