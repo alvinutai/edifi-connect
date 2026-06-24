@@ -194,9 +194,11 @@ function buildCatMap(covcatRows) {
  * @param {Object|null}   procCodeMap  Optional CodeNum → CDT-code-string map. Missing
  *                                     map or missing entry never drops a row — proc_code
  *                                     stays null and code_num is still forwarded.
+ * @param {Object|null}   codeGroupMap Optional CodeGroupNum → GroupName map (from /codegroups).
+ *                                     Resolves code_group_desc; missing map/entry → null.
  * @returns {Array}  Filtered, annotated benefit entries with _raw_received/_dropped/_dropped_reasons
  */
-function mapBenefits(rawBenefits, catMap, procCodeMap) {
+function mapBenefits(rawBenefits, catMap, procCodeMap, codeGroupMap) {
   const resolvedCatMap = catMap || COV_CAT_NUM_DEFAULTS;
   const results = [];
   const dropped_reasons = {};
@@ -233,6 +235,16 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
           typeof procCodeMap[code_num] === "string" &&
           procCodeMap[code_num]) ||
         null,
+      // Phase 6E: OD frequency limitations are keyed by CodeGroupNum (BW, Exam,
+      // Prophy, Crown, SRP, ...). Forward the number; resolve the name from the
+      // /codegroups map. Null-safe — a missing map/entry never drops the row.
+      code_group_num: Number(b.CodeGroupNum) || null,
+      code_group_desc:
+        (codeGroupMap != null &&
+          Number(b.CodeGroupNum) > 0 &&
+          typeof codeGroupMap[Number(b.CodeGroupNum)] === "string" &&
+          codeGroupMap[Number(b.CodeGroupNum)]) ||
+        null,
     };
 
     if (type === "CoInsurance") {
@@ -241,7 +253,26 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
       entry.amount_cents =
         b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
     } else if (type === "Limitations") {
-      if (b.Quantity != null) {
+      // Forward the raw OD frequency qualifier (NumberOfServices | Years | Months |
+      // AgeLimit | None) for shape-parity with the MySQL benefit path, then encode
+      // the limitation interval into `period` the way limitationFreq (6E-2) expects:
+      //   NumberOfServices → N per benefit window (CalendarYear/ServiceYear)
+      //   Years            → Years{N}  (once every N years; count collapses to 1)
+      //   Months           → Months{N} (once every N months)
+      // AgeLimit / None keep prior behavior — no frequency is derived.
+      entry.qualifier = b.QuantityQualifier ?? null;
+      const qq = String(b.QuantityQualifier ?? "");
+      const qty = Number(b.Quantity ?? 0);
+      if (qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = b.Quantity;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
+      } else if (qty > 0 && qq === "Years") {
+        entry.quantity = 1;
+        entry.period = `Years${qty}`;
+      } else if (qty > 0 && qq === "Months") {
+        entry.quantity = 1;
+        entry.period = `Months${qty}`;
+      } else if (b.Quantity != null) {
         entry.quantity = b.Quantity;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }

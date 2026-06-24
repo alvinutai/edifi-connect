@@ -3481,6 +3481,40 @@ async function getOdProcCodes() {
   return {};
 }
 
+// Phase 6E: CodeGroupNum → GroupName cache for the REST benefit path. OD stores
+// frequency limitations keyed by CodeGroupNum (BW, Exam, Prophy, Crown, SRP, ...);
+// /benefits returns the number, /codegroups resolves the name. Same fetch class as
+// /covcat and /procedurecodes — refreshed each sync, fails safe (code_group_desc=null).
+let odCodeGroupCache = null; // { CodeGroupNum: "BW", ... }
+
+async function getOdCodeGroups() {
+  if (odCodeGroupCache) return odCodeGroupCache;
+  try {
+    const groups = await odGet("/codegroups");
+    if (Array.isArray(groups) && groups.length > 0) {
+      const map = {};
+      for (const g of groups) {
+        if (
+          g.CodeGroupNum != null &&
+          typeof g.GroupName === "string" &&
+          g.GroupName
+        ) {
+          map[Number(g.CodeGroupNum)] = g.GroupName;
+        }
+      }
+      odCodeGroupCache = map;
+      log(
+        `[OD Benefits] CodeGroup cache warmed: ${Object.keys(map).length} groups`,
+      );
+      return map;
+    }
+  } catch (e) {
+    log(`[OD Benefits] CodeGroup cache fetch failed (will retry): ${e.message}`);
+  }
+  odCodeGroupCache = {};
+  return odCodeGroupCache;
+}
+
 function mapOdApiBenefits(rawBenefits) {
   // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
@@ -3575,6 +3609,15 @@ function mapOdApiBenefits(rawBenefits) {
           typeof odProcCodeCache[code_num] === "string" &&
           odProcCodeCache[code_num]) ||
         null,
+      // Phase 6E: forward CodeGroup identity for frequency limitations. Null-safe —
+      // a cold/failed CodeGroup cache forwards the number alone (code_group_desc=null).
+      code_group_num: Number(b.CodeGroupNum) || null,
+      code_group_desc:
+        (odCodeGroupCache != null &&
+          Number(b.CodeGroupNum) > 0 &&
+          typeof odCodeGroupCache[Number(b.CodeGroupNum)] === "string" &&
+          odCodeGroupCache[Number(b.CodeGroupNum)]) ||
+        null,
     };
     if (type === "CoInsurance") {
       entry.percent = Number(b.Percent);
@@ -3582,8 +3625,23 @@ function mapOdApiBenefits(rawBenefits) {
       entry.amount_cents =
         b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
     } else if (type === "Limitations") {
-      // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits)
-      if (b.Quantity != null) {
+      // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits).
+      // Forward the raw OD frequency qualifier and encode the limitation interval into
+      // `period` so limitationFreq (6E-2) renders it: NumberOfServices → N per window,
+      // Years → Years{N}, Months → Months{N}. AgeLimit / None keep prior behavior.
+      entry.qualifier = b.QuantityQualifier ?? null;
+      const qq = String(b.QuantityQualifier ?? "");
+      const qty = Number(b.Quantity ?? 0);
+      if (qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = b.Quantity;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
+      } else if (qty > 0 && qq === "Years") {
+        entry.quantity = 1;
+        entry.period = `Years${qty}`;
+      } else if (qty > 0 && qq === "Months") {
+        entry.quantity = 1;
+        entry.period = `Months${qty}`;
+      } else if (b.Quantity != null) {
         entry.quantity = b.Quantity;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }
@@ -3619,6 +3677,7 @@ async function syncODData(syncDate = null) {
 
   odCovCatCache = null; // refresh category map each sync — office may have added categories
   odProcCodeCache = null; // 6D-1B: same lifetime — codes added in OD resolve without a restart
+  odCodeGroupCache = null; // 6E: same lifetime — code groups added in OD resolve without a restart
   const today = syncDate ?? new Date().toISOString().split("T")[0];
   log(`[OD Sync] Starting for ${today}...`);
 
@@ -3669,11 +3728,12 @@ async function syncODData(syncDate = null) {
       `[OD Sync] ${scheduled.length} scheduled appointments — fetching patient data...`,
     );
 
-    // Pre-warm coverage category + procedure code caches so benefit mapping
-    // is accurate. Either cache failing degrades gracefully (GENERAL category /
-    // null proc_code) — never blocks the sync.
+    // Pre-warm coverage category + procedure code + code group caches so benefit
+    // mapping is accurate. Any cache failing degrades gracefully (GENERAL category /
+    // null proc_code / null code_group_desc) — never blocks the sync.
     await getOdCovCats();
     await getOdProcCodes();
+    await getOdCodeGroups();
 
     // Fetch operatory names once — used to label appointment cards correctly
     const operatoryMap = await getOperatoryMap();

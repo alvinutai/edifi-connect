@@ -133,6 +133,8 @@ test("exact key set pinned for a mapped CoInsurance entry (additive contract, 6D
     "benefit_num",
     "category",
     "category_source",
+    "code_group_desc",
+    "code_group_num",
     "code_num",
     "cov_cat_num",
     "coverage_level",
