@@ -56,6 +56,7 @@
       "od-mysql.js",
       "setup.html",
       "setup-preload.js",
+      "od-listener-decision.js",
       "lib/**",
       "node_modules/**",
       "!node_modules/playwright/.local-browsers/**"

@@ -14,7 +14,7 @@
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         background: #f9fafb;
         color: #111827;
-        height: 100vh;
+        min-height: 100vh;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -119,6 +119,11 @@
         background: #fef2f2;
         color: #dc2626;
       }
+      .od-status.warn {
+        border-color: #fde68a;
+        background: #fffbeb;
+        color: #b45309;
+      }
       .od-status.detecting {
         color: #6b7280;
       }
@@ -134,6 +139,9 @@
       .dot.red {
         background: #dc2626;
       }
+      .dot.amber {
+        background: #d97706;
+      }
       .dot.gray {
         background: #9ca3af;
         animation: pulse 1s infinite;
@@ -146,6 +154,81 @@
         50% {
           opacity: 0.4;
         }
+      }
+
+      /* OD connection wizard */
+      .conn-body {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #374151;
+        line-height: 1.5;
+      }
+      .conn-body p.detail {
+        margin-bottom: 10px;
+      }
+      ol.od-steps {
+        margin: 0 0 12px 18px;
+        padding: 0;
+        font-size: 13px;
+        color: #374151;
+        line-height: 1.55;
+      }
+      ol.od-steps li {
+        margin-bottom: 4px;
+      }
+      .menu-path {
+        display: inline-block;
+        background: #eef2ff;
+        color: #001f71;
+        border-radius: 6px;
+        padding: 2px 8px;
+        font-weight: 600;
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+      .btn-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+      button.secondary {
+        padding: 9px 14px;
+        background: white;
+        color: #001f71;
+        border: 1px solid #001f71;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      button.secondary:hover:not(:disabled) {
+        background: #eef2ff;
+      }
+      button.secondary:disabled {
+        color: #9ca3af;
+        border-color: #d1d5db;
+        cursor: not-allowed;
+      }
+      a.doc-link {
+        color: #001f71;
+        cursor: pointer;
+        text-decoration: underline;
+        font-size: 12px;
+      }
+      textarea.diag-box {
+        width: 100%;
+        height: 96px;
+        margin-top: 8px;
+        padding: 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 11px;
+        color: #374151;
+        background: #f9fafb;
+        resize: vertical;
       }
 
       button.primary {
@@ -213,12 +296,21 @@
         <div class="hint" style="margin-top: 6px" id="od-hint"></div>
       </div>
 
+      <div class="step" id="od-conn-step">
+        <label>Open Dental Connection</label>
+        <div class="od-status detecting" id="od-conn">
+          <div class="dot gray" id="od-conn-dot"></div>
+          <span id="od-conn-text">Checking the Open Dental Web Service...</span>
+        </div>
+        <div class="conn-body" id="od-conn-body"></div>
+      </div>
+
       <div class="step">
         <label>Open Dental API URL</label>
         <input
           type="text"
           id="od-url"
-          placeholder="http://localhost/opendentalapi"
+          placeholder="http://localhost:30222/api/v1"
         />
         <div class="hint">
           Auto-detected from your server. Change if different.
@@ -233,8 +325,8 @@
           placeholder="Paste your OD REST customer key"
         />
         <div class="hint">
-          In Open Dental: Setup → System Setup → Web Config → REST → Customer
-          Key. Required to read patient and insurance data.
+          In Open Dental: Setup &gt; Advanced Setup &gt; API &gt; Add Key.
+          Required to read patient and insurance data.
         </div>
       </div>
 
@@ -271,7 +363,34 @@
       </p>
     </div>
 
+    <script src="od-listener-decision.js"></script>
     <script>
+      // Docs-grounded (OpenDental official docs, verified 2026-07-06; confirmed
+      // on OD v25.3.83). Keyed by the engine's showEnableSteps value.
+      const odEnableSteps = {
+        api: {
+          menuPath: "Setup > Advanced Setup > API",
+          steps: [
+            "In Open Dental, open Setup > Advanced Setup > API.",
+            "Check the 'Enabled' checkbox.",
+            "Click 'Add Key' (lower left) and paste the Customer Key from your EDiFi welcome email.",
+            "Click OK, then come back and click Re-check.",
+          ],
+          docs: "https://www.opendental.com/site/apisetup.html",
+        },
+        econnector: {
+          menuPath: "Main Menu > eServices > eConnector Service",
+          steps: [
+            "In Open Dental's Main Menu, click eServices > eConnector Service.",
+            "Click 'Install'.",
+            "When asked to allow the eConnector to begin listening for requests, click Yes.",
+            "If asked to set this computer as the Update Server, click Yes; then OK.",
+            "Come back and click Re-check.",
+          ],
+          docs: "https://www.opendental.com/manual/econnector.html",
+        },
+      };
+
       function openSupport() {
         // Contact support
       }
@@ -282,11 +401,213 @@
         document.getElementById("connect-btn").disabled = code.length < 8;
       });
 
-      // Pre-fill existing config and detect OD on load
+      function renderOdStatus(od) {
+        const statusEl = document.getElementById("od-status");
+        const dotEl = document.getElementById("od-dot");
+        const textEl = document.getElementById("od-text");
+        const hintEl = document.getElementById("od-hint");
+        const urlInput = document.getElementById("od-url");
+
+        if (od.found) {
+          statusEl.className = "od-status found";
+          dotEl.className = "dot green";
+          const verText = od.version ? ` v${od.version}` : "";
+          textEl.textContent = `Open Dental found${verText}`;
+          // Pre-fill from detect only as a starting guess — the connection step
+          // below verifies the live port and corrects the URL. Don't echo the
+          // detected URL here (detect can false-positive, e.g. Docker on 8080).
+          if (od.apiUrl && !urlInput.value) urlInput.value = od.apiUrl;
+          hintEl.textContent = "";
+        } else {
+          statusEl.className = "od-status not-found";
+          dotEl.className = "dot red";
+          textEl.textContent = "Open Dental not detected on this computer";
+          hintEl.textContent =
+            "Run this installer on the computer where Open Dental is installed.";
+        }
+      }
+
+      // Runs the read-only probes and renders the connection verdict.
+      async function runListenerCheck(preDetect) {
+        const statusEl = document.getElementById("od-conn");
+        const dotEl = document.getElementById("od-conn-dot");
+        const textEl = document.getElementById("od-conn-text");
+        const bodyEl = document.getElementById("od-conn-body");
+
+        statusEl.className = "od-status detecting";
+        dotEl.className = "dot gray";
+        textEl.textContent = "Checking the Open Dental Web Service...";
+        bodyEl.innerHTML = "";
+
+        let detect, ports, service, restAuth, cfg;
+        try {
+          detect = preDetect || (await window.edifi.detectOD());
+          [ports, service, restAuth, cfg] = await Promise.all([
+            window.edifi.diagListenerPorts(),
+            window.edifi.diagServiceStatus(),
+            window.edifi.diagRestAuth(),
+            window.edifi.getConfig(),
+          ]);
+        } catch (e) {
+          statusEl.className = "od-status warn";
+          dotEl.className = "dot amber";
+          textEl.textContent = "Couldn't check the connection";
+          bodyEl.innerHTML =
+            '<p class="detail">The check didn\'t run. Click Re-check to try again.</p>';
+          appendReCheck(bodyEl);
+          return;
+        }
+
+        const input = {
+          detect,
+          ports,
+          service,
+          restAuth,
+          ui: { hasCustomerKey: cfg && cfg.od_customer_key_set === true },
+        };
+        const verdict = window.odListenerDecision.classifyListenerState(input);
+        renderVerdict(verdict, input);
+      }
+
+      function renderVerdict(verdict, input) {
+        const statusEl = document.getElementById("od-conn");
+        const dotEl = document.getElementById("od-conn-dot");
+        const textEl = document.getElementById("od-conn-text");
+        const bodyEl = document.getElementById("od-conn-body");
+
+        const good = verdict.case === "OK" || verdict.case === "LISTENER_UP";
+        if (good) {
+          statusEl.className = "od-status found";
+          dotEl.className = "dot green";
+        } else if (verdict.escalate || verdict.case === "OD_NOT_FOUND") {
+          statusEl.className = "od-status warn";
+          dotEl.className = "dot amber";
+        } else {
+          statusEl.className = "od-status not-found";
+          dotEl.className = "dot red";
+        }
+        textEl.textContent = verdict.title;
+
+        bodyEl.innerHTML = "";
+        const detail = document.createElement("p");
+        detail.className = "detail";
+        detail.textContent = verdict.detail;
+        bodyEl.appendChild(detail);
+
+        if (verdict.showEnableSteps && odEnableSteps[verdict.showEnableSteps]) {
+          renderEnableSteps(bodyEl, odEnableSteps[verdict.showEnableSteps]);
+        }
+
+        // Trust the live port probe over detect-od's URL guess (detect can
+        // false-positive on unrelated ports, e.g. a Docker service on 8080).
+        // Point EDiFi at the port we actually confirmed a listener on.
+        if (verdict.servingPort) {
+          const urlInput = document.getElementById("od-url");
+          if (!urlInput.value.includes(`:${verdict.servingPort}/`)) {
+            urlInput.value = `http://localhost:${verdict.servingPort}/api/v1`;
+            const note = document.createElement("div");
+            note.className = "hint";
+            note.textContent = `EDiFi will use port ${verdict.servingPort}.`;
+            bodyEl.appendChild(note);
+          }
+        }
+
+        if (verdict.showKeyStep) {
+          const keyInput = document.getElementById("od-customer-key");
+          keyInput.focus();
+          keyInput.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+
+        const row = document.createElement("div");
+        row.className = "btn-row";
+        if (verdict.showReCheck) row.appendChild(makeReCheckBtn());
+        if (verdict.escalate) {
+          appendDiagnostics(bodyEl, input);
+        }
+        if (row.childNodes.length) bodyEl.appendChild(row);
+      }
+
+      function renderEnableSteps(bodyEl, content) {
+        const path = document.createElement("div");
+        path.className = "menu-path";
+        path.textContent = content.menuPath;
+        bodyEl.appendChild(path);
+
+        const ol = document.createElement("ol");
+        ol.className = "od-steps";
+        content.steps.forEach((s) => {
+          const li = document.createElement("li");
+          li.textContent = s;
+          ol.appendChild(li);
+        });
+        bodyEl.appendChild(ol);
+
+        if (content.docs) {
+          const link = document.createElement("a");
+          link.className = "doc-link";
+          link.textContent = "View the Open Dental help page";
+          link.onclick = () => window.edifi.openExternal(content.docs);
+          bodyEl.appendChild(link);
+        }
+      }
+
+      function makeReCheckBtn() {
+        const btn = document.createElement("button");
+        btn.className = "secondary";
+        btn.textContent = "Re-check";
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = "Checking...";
+          await runListenerCheck();
+        };
+        return btn;
+      }
+
+      function appendReCheck(bodyEl) {
+        const row = document.createElement("div");
+        row.className = "btn-row";
+        row.appendChild(makeReCheckBtn());
+        bodyEl.appendChild(row);
+      }
+
+      // Safe diagnostics only — booleans / states / status codes / ports / version.
+      function appendDiagnostics(bodyEl, input) {
+        const summary = window.odListenerDecision.buildDiagnosticSummary(input);
+        const box = document.createElement("textarea");
+        box.className = "diag-box";
+        box.readOnly = true;
+        box.value = Object.entries(summary)
+          .map(([k, v]) => `${k} = ${v}`)
+          .join("\n");
+        bodyEl.appendChild(box);
+
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = "Send this to your EDiFi onboarding contact.";
+        bodyEl.appendChild(hint);
+
+        const row = document.createElement("div");
+        row.className = "btn-row";
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "secondary";
+        copyBtn.textContent = "Copy diagnostics";
+        copyBtn.onclick = () => {
+          box.select();
+          try {
+            document.execCommand("copy");
+            copyBtn.textContent = "Copied";
+          } catch (e) {
+            copyBtn.textContent = "Select the text above and copy";
+          }
+        };
+        row.appendChild(copyBtn);
+        bodyEl.appendChild(row);
+      }
+
+      // Pre-fill existing config and run detection + connection check on load.
       window.addEventListener("DOMContentLoaded", async () => {
         if (!window.edifi) return;
 
-        // Pre-fill existing values if already registered
         try {
           const cfg = await window.edifi.getConfig();
           if (cfg.registered) {
@@ -303,37 +624,20 @@
           }
         } catch {}
 
+        let detect = null;
         try {
-          const od = await window.edifi.detectOD();
-          const statusEl = document.getElementById("od-status");
-          const dotEl = document.getElementById("od-dot");
-          const textEl = document.getElementById("od-text");
-          const hintEl = document.getElementById("od-hint");
-          const urlInput = document.getElementById("od-url");
-
-          if (od.found) {
-            statusEl.className = "od-status found";
-            dotEl.className = "dot green";
-            const verText = od.version ? ` v${od.version}` : "";
-            textEl.textContent = `Open Dental found${verText}`;
-
-            if (od.apiUrl && !od.apiUnreachable) {
-              urlInput.value = od.apiUrl;
-              hintEl.textContent = `Web Service detected at ${od.apiUrl}`;
-            } else if (od.apiUrl) {
-              urlInput.value = od.apiUrl;
-              hintEl.textContent = `Web Service not responding at ${od.apiUrl}. Make sure it is running in OD Setup → Web Service.`;
-            }
-          } else {
-            statusEl.className = "od-status not-found";
-            dotEl.className = "dot red";
-            textEl.textContent = "Open Dental not detected on this computer";
-            hintEl.textContent =
-              "Run this installer on the computer where Open Dental is installed.";
-          }
+          detect = await window.edifi.detectOD();
+          renderOdStatus(detect);
         } catch (e) {
           document.getElementById("od-text").textContent =
             "Detection error — please enter URL manually";
+        }
+
+        try {
+          await runListenerCheck(detect);
+        } catch (e) {
+          document.getElementById("od-conn-text").textContent =
+            "Couldn't check the connection";
         }
       });
 

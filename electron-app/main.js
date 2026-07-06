@@ -1008,24 +1008,22 @@ async function handleSetOdCustomerKey(commandId, payload) {
 // Returns HTTP status, auth result, and eConnector reachability.
 // Never returns response body, key values, or URL.
 
-async function handleTestOdRestAuth(commandId) {
+async function probeOdRestAuth() {
   if (!config.od_api_url) {
-    sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+    return {
       econnector_reachable: false,
       auth_accepted: false,
       http_status: null,
       error_category: "OD_API_URL_NOT_CONFIGURED",
-    });
-    return;
+    };
   }
   if (!config.od_customer_key) {
-    sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+    return {
       econnector_reachable: false,
       auth_accepted: false,
       http_status: null,
       error_category: "OD_CUSTOMER_KEY_NOT_SET",
-    });
-    return;
+    };
   }
 
   const trimmed = config.od_api_url.replace(/\/+$/, "");
@@ -1068,13 +1066,22 @@ async function handleTestOdRestAuth(commandId) {
     }
   }
 
-  sendCommandResult(commandId, "TEST_OD_REST_AUTH", "COMPLETED", {
+  return {
     econnector_reachable,
     auth_accepted,
     http_status,
     error_category,
     response_records,
-  });
+  };
+}
+
+async function handleTestOdRestAuth(commandId) {
+  sendCommandResult(
+    commandId,
+    "TEST_OD_REST_AUTH",
+    "COMPLETED",
+    await probeOdRestAuth(),
+  );
 }
 
 // ── SET_OD_API_URL ────────────────────────────────────────────────────────────
@@ -1611,7 +1618,7 @@ async function handleReadOdPlanNums(commandId, payload) {
             const carrierNum = Number(row.CarrierNum);
             const resolvedName =
               Number.isInteger(carrierNum) && carrierNum > 0
-                ? carrierMap.get(carrierNum) ?? null
+                ? (carrierMap.get(carrierNum) ?? null)
                 : null;
             const nameMatch =
               resolvedName !== null &&
@@ -1828,7 +1835,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
         });
         patPlanRows = Array.isArray(resp.data) ? resp.data : [];
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         throw e;
       }
 
@@ -1848,7 +1857,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           sub = subResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
@@ -1868,19 +1879,24 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           insplan = planResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
         if (!insplan) continue;
 
-        const ordinal = Number.isInteger(Number(pp.Ordinal)) ? Number(pp.Ordinal) : null;
+        const ordinal = Number.isInteger(Number(pp.Ordinal))
+          ? Number(pp.Ordinal)
+          : null;
         const carrierNum = Number(insplan.CarrierNum);
         planEntries.push({
           ordinal,
           planNum,
           insplan,
-          carrierNum: Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
+          carrierNum:
+            Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
         });
         if (planEntries.length >= 20) break;
       }
@@ -1907,7 +1923,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
                     : null,
               }))
               .catch((e) => {
-                log(`[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+                log(
+                  `[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+                );
                 return { num, name: null };
               }),
           ),
@@ -1921,7 +1939,7 @@ async function handleReadOdPatientPlan(commandId, payload) {
       plans = planEntries
         .map((entry, i) => {
           const resolvedName = entry.carrierNum
-            ? carrierMap.get(entry.carrierNum) ?? null
+            ? (carrierMap.get(entry.carrierNum) ?? null)
             : null;
           return sanitizePatientPlanRestRow(
             entry.insplan,
@@ -1952,7 +1970,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
       try {
         cfg = await readOdConfig();
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
       }
     }
     if (cfg && cfg.host && cfg.user && cfg.password) {
@@ -1990,13 +2010,17 @@ async function handleReadOdPatientPlan(commandId, payload) {
             `,
             [patNum],
           );
-          plans = rows.map((row, i) => sanitizePatientPlanMysqlRow(row, i)).filter(Boolean);
+          plans = rows
+            .map((row, i) => sanitizePatientPlanMysqlRow(row, i))
+            .filter(Boolean);
           source = "MYSQL_PATPLAN";
         } finally {
           await conn.end().catch(() => {});
         }
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         mysqlAvailable = false;
       }
     }
@@ -2563,7 +2587,7 @@ async function handleQuitAndInstall(commandId) {
 // Read-only netstat probe — checks whether port 30222 is listening.
 // No PHI, no credentials, no mutation.
 
-async function handleReportPortStatus(commandId) {
+function probePortStatus() {
   const { execSync } = require("child_process");
   let listening = false;
   let listener_pid = null;
@@ -2587,12 +2611,54 @@ async function handleReportPortStatus(commandId) {
     error = e.message.slice(0, 200);
   }
 
-  sendCommandResult(commandId, "REPORT_PORT_STATUS", "COMPLETED", {
-    port: 30222,
-    listening,
-    listener_pid,
-    error,
-  });
+  return { port: 30222, listening, listener_pid, error };
+}
+
+// Read-only: which OD API listeners are up. 30222 = Local API (inside
+// OpenDental.exe, only while OD is open + logged in); 30223 = API Service
+// (OpenDentalAPIService.exe, always-on). The wizard needs both to tell a
+// wrong-port situation (listener on 30223 only) from API-off (neither). One
+// netstat pass, no mutation. Port numbers are <= 65535 so ":30222"/":30223" are
+// unambiguous substrings.
+function probeListenerPorts() {
+  const { execSync } = require("child_process");
+  const result = {
+    30222: { listening: false, listener_pid: null },
+    30223: { listening: false, listener_pid: null },
+    error: null,
+  };
+
+  try {
+    const out = execSync("netstat -ano", {
+      encoding: "utf8",
+      timeout: 8000,
+      shell: true,
+    });
+    for (const line of out.split("\n")) {
+      if (!/LISTEN/i.test(line)) continue;
+      for (const p of [30222, 30223]) {
+        if (result[p].listening) continue;
+        if (line.includes(`:${p}`)) {
+          result[p].listening = true;
+          const m = line.trim().match(/(\d+)\s*$/);
+          if (m) result[p].listener_pid = parseInt(m[1], 10);
+        }
+      }
+    }
+  } catch (e) {
+    result.error = e.message.slice(0, 200);
+  }
+
+  return result;
+}
+
+async function handleReportPortStatus(commandId) {
+  sendCommandResult(
+    commandId,
+    "REPORT_PORT_STATUS",
+    "COMPLETED",
+    probePortStatus(),
+  );
 }
 
 // ── REPORT_SERVICE_STATUS ─────────────────────────────────────────────────────
@@ -2600,29 +2666,20 @@ async function handleReportPortStatus(commandId) {
 // Default service: OpenDenteConnector. Payload may override via service field.
 // No PHI, no credentials, no mutation.
 
-async function handleReportServiceStatus(commandId, payload) {
-  const { execSync } = require("child_process");
-
-  // Resolve service name — default to OpenDenteConnector if not provided
-  const rawService =
-    typeof payload?.service === "string" ? payload.service.trim() : "";
-  const SERVICE = rawService || "OpenDenteConnector";
-
-  // Allowlist validation — must pass before any execSync call.
-  // Rejects shell metacharacters that could enable injection via shell:true.
+// Resolve + allowlist-validate a service name (defaults to OpenDenteConnector).
+// Rejects shell metacharacters that could enable injection via shell:true.
+function validateServiceName(rawService) {
+  const SERVICE =
+    (typeof rawService === "string" ? rawService.trim() : "") ||
+    "OpenDenteConnector";
   const SAFE_SERVICE_NAME = /^[A-Za-z0-9 _.\\-]{1,80}$/;
-  if (!SAFE_SERVICE_NAME.test(SERVICE)) {
-    sendCommandResult(
-      commandId,
-      "REPORT_SERVICE_STATUS",
-      "FAILED",
-      null,
-      "INVALID_SERVICE_NAME",
-      "Service name contains invalid characters. Allowed: letters, digits, spaces, underscores, dots, hyphens (max 80 chars).",
-    );
-    return;
-  }
+  return SAFE_SERVICE_NAME.test(SERVICE)
+    ? { service: SERVICE }
+    : { invalid: true };
+}
 
+function probeServiceStatus(SERVICE) {
+  const { execSync } = require("child_process");
   let exists = false;
   let state = null;
   let start_type = null;
@@ -2672,20 +2729,36 @@ async function handleReportServiceStatus(commandId, payload) {
     } catch {}
   }
 
-  sendCommandResult(commandId, "REPORT_SERVICE_STATUS", "COMPLETED", {
-    service: SERVICE,
-    exists,
-    state,
-    start_type,
-    error,
-  });
+  return { service: SERVICE, exists, state, start_type, error };
+}
+
+async function handleReportServiceStatus(commandId, payload) {
+  const v = validateServiceName(payload?.service);
+  if (v.invalid) {
+    sendCommandResult(
+      commandId,
+      "REPORT_SERVICE_STATUS",
+      "FAILED",
+      null,
+      "INVALID_SERVICE_NAME",
+      "Service name contains invalid characters. Allowed: letters, digits, spaces, underscores, dots, hyphens (max 80 chars).",
+    );
+    return;
+  }
+
+  sendCommandResult(
+    commandId,
+    "REPORT_SERVICE_STATUS",
+    "COMPLETED",
+    probeServiceStatus(v.service),
+  );
 }
 
 // ── GET_ECONNECTOR_LOG ────────────────────────────────────────────────────────
 // Reads Windows Event Log for OpenDenteConnector crash/error entries.
 // Read-only. No PHI. Returns event summary to diagnose eConnector startup failures.
 
-async function handleGetEConnectorLog(commandId) {
+function probeEConnectorLog() {
   const { execSync } = require("child_process");
   let events = [];
   let error = null;
@@ -2730,11 +2803,16 @@ async function handleGetEConnectorLog(commandId) {
     events = events.concat(lines2.slice(0, 10));
   } catch {}
 
-  sendCommandResult(commandId, "GET_ECONNECTOR_LOG", "COMPLETED", {
-    event_count: events.length,
-    events,
-    error,
-  });
+  return { event_count: events.length, events, error };
+}
+
+async function handleGetEConnectorLog(commandId) {
+  sendCommandResult(
+    commandId,
+    "GET_ECONNECTOR_LOG",
+    "COMPLETED",
+    probeEConnectorLog(),
+  );
 }
 
 // ── WRITE_HOSTS_ENTRY ─────────────────────────────────────────────────────────
@@ -3509,7 +3587,9 @@ async function getOdCodeGroups() {
       return map;
     }
   } catch (e) {
-    log(`[OD Benefits] CodeGroup cache fetch failed (will retry): ${e.message}`);
+    log(
+      `[OD Benefits] CodeGroup cache fetch failed (will retry): ${e.message}`,
+    );
   }
   odCodeGroupCache = {};
   return odCodeGroupCache;
@@ -5134,6 +5214,34 @@ ipcMain.handle("get-config", () => ({
   od_customer_key_set: !!config.od_customer_key,
   registered: config.registered,
 }));
+
+// ─── Diagnostic IPC (local, read-only) ────────────────────────────────────────
+// Powers the setup-window OD-listener wizard. Same probes as the
+// REPORT_PORT_STATUS / REPORT_SERVICE_STATUS / GET_ECONNECTOR_LOG /
+// TEST_OD_REST_AUTH remote commands, callable locally without the tunnel.
+// Return only booleans / states / status codes / counts — never keys or PHI.
+
+ipcMain.handle("diag-port-status", () => probePortStatus());
+
+ipcMain.handle("diag-listener-ports", () => probeListenerPorts());
+
+ipcMain.handle("diag-service-status", (_, arg) => {
+  const v = validateServiceName(arg?.service);
+  if (v.invalid) return { invalid: true, service: null };
+  return probeServiceStatus(v.service);
+});
+
+ipcMain.handle("diag-econnector-log", () => probeEConnectorLog());
+
+ipcMain.handle("diag-rest-auth", () => probeOdRestAuth());
+
+ipcMain.handle("open-external", (_, url) => {
+  if (typeof url === "string" && /^https?:\/\//i.test(url)) {
+    shell.openExternal(url);
+    return { ok: true };
+  }
+  return { ok: false, error: "INVALID_URL" };
+});
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 
