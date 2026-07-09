@@ -3595,6 +3595,40 @@ async function getOdCodeGroups() {
   return odCodeGroupCache;
 }
 
+// B-014 fix (2026-07-09) — shared strict numeric parser. Accepts real numbers
+// or well-formed numeric strings; rejects null/undefined/booleans/arrays/
+// objects/empty-or-malformed strings/NaN/Infinity by returning null instead
+// of silently coercing to 0/1/NaN. See EDIFI-EOS\B014-FIX-PACKET-2026-07-09.md
+// (6 Codex review rounds) for the full defect history and design rationale.
+// KEEP IN SYNC with the identical copy in lib/benefit-mapper.js (mirrors the
+// existing BEN_TYPE/COV_LEVEL/TIME_PERIOD duplication pattern in this file).
+function toFiniteNumberOrNull(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    // Intentionally narrow: accepts "0", "001", "12.5", "-3" after trimming.
+    // Deliberately rejects scientific notation, leading "+", and thousands
+    // separators unless real OD samples are found using those formats.
+    if (t === "" || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null; // booleans, arrays, objects — never coerced
+}
+
+// Domain guard found during implementation (not in the original 6-round
+// design packet): Open Dental uses negative sentinels — e.g. Percent=-1 —
+// to mean "not entered" (see test/mysql-benefit-row.test.js, "Percent=-1
+// (OD not-entered sentinel) drops the row as before"). No real coverage
+// percent, dollar amount, or frequency count is ever negative, so a negative
+// parsed value is treated as absent rather than preserved as fabricated
+// data — this closes a gap the packet's numeric contract didn't cover.
+function toNonNegativeFiniteOrNull(raw) {
+  const n = toFiniteNumberOrNull(raw);
+  return n != null && n >= 0 ? n : null;
+}
+
 function mapOdApiBenefits(rawBenefits) {
   // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
@@ -3648,12 +3682,16 @@ function mapOdApiBenefits(rawBenefits) {
 
   const results = [];
   const dropped_reasons = {};
+  const fallback_reason_counts = {};
   for (const b of rawBenefits) {
-    const type = BEN_TYPE[b.BenefitType];
-    if (!type) {
-      const key = `type_${b.BenefitType}_unmapped`;
-      dropped_reasons[key] = (dropped_reasons[key] || 0) + 1;
-      continue;
+    // B-014 fix: unrecognized BenefitType is preserved as "Other" instead of
+    // silently `continue`-d past. Counted in fallback_reason_counts, NOT
+    // dropped_reasons — this row is preserved, not discarded, so it must
+    // never contribute to the true-drop invariant.
+    const type = BEN_TYPE[b.BenefitType] || "Other";
+    if (!BEN_TYPE[b.BenefitType]) {
+      const key = `type_${b.BenefitType}_unmapped_fallback`;
+      fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
     }
     const catFromCovCat = catMap[b.CovCatNum] || "GENERAL";
     const { category, categorySource } = resolveBenefitCategory(
@@ -3700,10 +3738,10 @@ function mapOdApiBenefits(rawBenefits) {
         null,
     };
     if (type === "CoInsurance") {
-      entry.percent = Number(b.Percent);
+      entry.percent = toNonNegativeFiniteOrNull(b.Percent);
     } else if (type === "Deductible") {
-      entry.amount_cents =
-        b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
+      const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
       // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits).
       // Forward the raw OD frequency qualifier and encode the limitation interval into
@@ -3711,39 +3749,80 @@ function mapOdApiBenefits(rawBenefits) {
       // Years → Years{N}, Months → Months{N}. AgeLimit / None keep prior behavior.
       entry.qualifier = b.QuantityQualifier ?? null;
       const qq = String(b.QuantityQualifier ?? "");
-      const qty = Number(b.Quantity ?? 0);
-      if (qty > 0 && qq === "NumberOfServices") {
-        entry.quantity = b.Quantity;
+      const qty = toNonNegativeFiniteOrNull(b.Quantity);
+      if (qty != null && qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
-      } else if (qty > 0 && qq === "Years") {
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Years"
+      ) {
         entry.quantity = 1;
         entry.period = `Years${qty}`;
-      } else if (qty > 0 && qq === "Months") {
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Months"
+      ) {
         entry.quantity = 1;
         entry.period = `Months${qty}`;
-      } else if (b.Quantity != null) {
-        entry.quantity = b.Quantity;
+      } else if (
+        qty != null &&
+        qty > 0 &&
+        !Number.isInteger(qty) &&
+        (qq === "Years" || qq === "Months")
+      ) {
+        // Decimal Years/Months quantity — no standard period label exists
+        // for this (labels are integer-style: Years2, Months6, ...). Preserve
+        // the row instead of silently degrading it to period: "None"; flag
+        // it via fallback_reason_counts so it's visible, not lost.
+        entry.quantity = qty;
+        entry.period = "None";
+        const key = `limitations_decimal_${qq.toLowerCase()}_qty`;
+        fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
+      } else if (qty != null) {
+        entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }
-      if (b.MonetaryAmt != null && Number(b.MonetaryAmt) > 0) {
-        entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
-      }
+      const limCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      if (limCents != null) entry.amount_cents = Math.round(limCents * 100);
     }
     results.push(entry);
   }
 
+  // Post-loop value filter — the row-level reason is attributed HERE, at the
+  // point of rejection, so dropped_reasons stays exhaustive: every row
+  // missing from `filtered` relative to `results` has exactly one reason key.
   const filtered = results.filter((b) => {
-    if (b.type === "CoInsurance") return b.percent > 0;
-    if (b.type === "Deductible") return b.amount_cents != null;
-    if (b.type === "Limitations")
-      return b.quantity != null || b.amount_cents != null;
-    return true;
+    if (b.type === "CoInsurance") {
+      if (b.percent != null) return true;
+      dropped_reasons.coinsurance_invalid_percent =
+        (dropped_reasons.coinsurance_invalid_percent || 0) + 1;
+      return false;
+    }
+    if (b.type === "Deductible") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.deductible_invalid_amount =
+        (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "Limitations") {
+      if (b.quantity != null || b.amount_cents != null) return true;
+      dropped_reasons.limitations_no_valid_value =
+        (dropped_reasons.limitations_no_valid_value || 0) + 1;
+      return false;
+    }
+    return true; // "Other" fallback rows are never dropped by this filter
   });
 
   // Attach diagnostic metadata (not sent to backend as-is; caller uses it for stats)
   filtered._raw_received = rawBenefits.length;
   filtered._dropped = rawBenefits.length - filtered.length;
   filtered._dropped_reasons = dropped_reasons;
+  filtered._fallback_reasons = fallback_reason_counts;
 
   return filtered;
 }
@@ -3827,6 +3906,7 @@ async function syncODData(syncDate = null) {
       mapped_benefit_rows: 0,
       dropped_benefit_rows: 0,
       dropped_reason_counts: {},
+      fallback_reason_counts: {},
       coinsurance_rows_mapped: 0,
       deductible_rows_mapped: 0,
       limitation_rows_mapped: 0,
@@ -3940,6 +4020,11 @@ async function syncODData(syncDate = null) {
                   for (const [k, v] of Object.entries(droppedReasons)) {
                     benefitStats.dropped_reason_counts[k] =
                       (benefitStats.dropped_reason_counts[k] || 0) + v;
+                  }
+                  const fallbackReasons = benefits._fallback_reasons || {};
+                  for (const [k, v] of Object.entries(fallbackReasons)) {
+                    benefitStats.fallback_reason_counts[k] =
+                      (benefitStats.fallback_reason_counts[k] || 0) + v;
                   }
                   benefitStats.coinsurance_rows_mapped += benefits.filter(
                     (b) => b.type === "CoInsurance",
