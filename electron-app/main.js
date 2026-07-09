@@ -1611,7 +1611,7 @@ async function handleReadOdPlanNums(commandId, payload) {
             const carrierNum = Number(row.CarrierNum);
             const resolvedName =
               Number.isInteger(carrierNum) && carrierNum > 0
-                ? carrierMap.get(carrierNum) ?? null
+                ? (carrierMap.get(carrierNum) ?? null)
                 : null;
             const nameMatch =
               resolvedName !== null &&
@@ -1828,7 +1828,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
         });
         patPlanRows = Array.isArray(resp.data) ? resp.data : [];
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] PATPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         throw e;
       }
 
@@ -1848,7 +1850,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           sub = subResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSSUB_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
@@ -1868,19 +1872,24 @@ async function handleReadOdPatientPlan(commandId, payload) {
           });
           insplan = planResp.data;
         } catch (e) {
-          log(`[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+          log(
+            `[READ_OD_PATIENT_PLAN] INSPLAN_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+          );
           continue;
         }
 
         if (!insplan) continue;
 
-        const ordinal = Number.isInteger(Number(pp.Ordinal)) ? Number(pp.Ordinal) : null;
+        const ordinal = Number.isInteger(Number(pp.Ordinal))
+          ? Number(pp.Ordinal)
+          : null;
         const carrierNum = Number(insplan.CarrierNum);
         planEntries.push({
           ordinal,
           planNum,
           insplan,
-          carrierNum: Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
+          carrierNum:
+            Number.isInteger(carrierNum) && carrierNum > 0 ? carrierNum : null,
         });
         if (planEntries.length >= 20) break;
       }
@@ -1907,7 +1916,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
                     : null,
               }))
               .catch((e) => {
-                log(`[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`);
+                log(
+                  `[READ_OD_PATIENT_PLAN] CARRIER_LOOKUP_FAILED: ${String(e.message ?? "unknown").slice(0, 80)}`,
+                );
                 return { num, name: null };
               }),
           ),
@@ -1921,7 +1932,7 @@ async function handleReadOdPatientPlan(commandId, payload) {
       plans = planEntries
         .map((entry, i) => {
           const resolvedName = entry.carrierNum
-            ? carrierMap.get(entry.carrierNum) ?? null
+            ? (carrierMap.get(entry.carrierNum) ?? null)
             : null;
           return sanitizePatientPlanRestRow(
             entry.insplan,
@@ -1952,7 +1963,9 @@ async function handleReadOdPatientPlan(commandId, payload) {
       try {
         cfg = await readOdConfig();
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] readOdConfig error: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
       }
     }
     if (cfg && cfg.host && cfg.user && cfg.password) {
@@ -1990,13 +2003,17 @@ async function handleReadOdPatientPlan(commandId, payload) {
             `,
             [patNum],
           );
-          plans = rows.map((row, i) => sanitizePatientPlanMysqlRow(row, i)).filter(Boolean);
+          plans = rows
+            .map((row, i) => sanitizePatientPlanMysqlRow(row, i))
+            .filter(Boolean);
           source = "MYSQL_PATPLAN";
         } finally {
           await conn.end().catch(() => {});
         }
       } catch (e) {
-        log(`[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`);
+        log(
+          `[READ_OD_PATIENT_PLAN] MySQL failed: ${String(e.message ?? "unknown").slice(0, 80)}`,
+        );
         mysqlAvailable = false;
       }
     }
@@ -3481,6 +3498,37 @@ async function getOdProcCodes() {
   return {};
 }
 
+// B-014 fix (2026-07-09) — shared strict numeric parser. Accepts real numbers
+// or well-formed numeric strings; rejects null/undefined/booleans/arrays/
+// objects/empty-or-malformed strings/NaN/Infinity by returning null instead
+// of silently coercing to 0/1/NaN. See EDIFI-EOS\B014-FIX-PACKET-2026-07-09.md
+// for the full defect history and design rationale. Adapted for the rc.3
+// baseline: this candidate deliberately EXCLUDES 5a35003 (REST CodeGroup
+// frequency metadata, a suspect in the rc.2 bridge-hold regression), so this
+// fix carries only the three drop-mechanism corrections, not the qualifier-
+// aware Years/Months period synthesis that 5a35003 introduced.
+// KEEP IN SYNC with the identical copy in lib/benefit-mapper.js.
+function toFiniteNumberOrNull(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t === "" || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null; // booleans, arrays, objects — never coerced
+}
+
+// Domain guard: Open Dental uses negative sentinels (e.g. Percent=-1) to mean
+// "not entered". No real coverage percent, dollar amount, or frequency count
+// is ever negative, so a negative parsed value is treated as absent rather
+// than preserved as fabricated data.
+function toNonNegativeFiniteOrNull(raw) {
+  const n = toFiniteNumberOrNull(raw);
+  return n != null && n >= 0 ? n : null;
+}
+
 function mapOdApiBenefits(rawBenefits) {
   // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
@@ -3534,12 +3582,15 @@ function mapOdApiBenefits(rawBenefits) {
 
   const results = [];
   const dropped_reasons = {};
+  const fallback_reason_counts = {};
   for (const b of rawBenefits) {
-    const type = BEN_TYPE[b.BenefitType];
-    if (!type) {
-      const key = `type_${b.BenefitType}_unmapped`;
-      dropped_reasons[key] = (dropped_reasons[key] || 0) + 1;
-      continue;
+    // B-014 fix: unrecognized BenefitType is preserved as "Other" instead of
+    // silently `continue`-d past. Counted in fallback_reason_counts, NOT
+    // dropped_reasons — this row is preserved, not discarded.
+    const type = BEN_TYPE[b.BenefitType] || "Other";
+    if (!BEN_TYPE[b.BenefitType]) {
+      const key = `type_${b.BenefitType}_unmapped_fallback`;
+      fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
     }
     const catFromCovCat = catMap[b.CovCatNum] || "GENERAL";
     const { category, categorySource } = resolveBenefitCategory(
@@ -3577,35 +3628,53 @@ function mapOdApiBenefits(rawBenefits) {
         null,
     };
     if (type === "CoInsurance") {
-      entry.percent = Number(b.Percent);
+      entry.percent = toNonNegativeFiniteOrNull(b.Percent);
     } else if (type === "Deductible") {
-      entry.amount_cents =
-        b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
+      const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
       // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits)
-      if (b.Quantity != null) {
-        entry.quantity = b.Quantity;
+      const qty = toNonNegativeFiniteOrNull(b.Quantity);
+      if (qty != null) {
+        entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }
-      if (b.MonetaryAmt != null && Number(b.MonetaryAmt) > 0) {
-        entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
-      }
+      const limCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      if (limCents != null) entry.amount_cents = Math.round(limCents * 100);
     }
     results.push(entry);
   }
 
+  // Post-loop value filter — the row-level reason is attributed HERE, at the
+  // point of rejection, so dropped_reasons stays exhaustive: every row
+  // missing from `filtered` relative to `results` has exactly one reason key.
   const filtered = results.filter((b) => {
-    if (b.type === "CoInsurance") return b.percent > 0;
-    if (b.type === "Deductible") return b.amount_cents != null;
-    if (b.type === "Limitations")
-      return b.quantity != null || b.amount_cents != null;
-    return true;
+    if (b.type === "CoInsurance") {
+      if (b.percent != null) return true;
+      dropped_reasons.coinsurance_invalid_percent =
+        (dropped_reasons.coinsurance_invalid_percent || 0) + 1;
+      return false;
+    }
+    if (b.type === "Deductible") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.deductible_invalid_amount =
+        (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "Limitations") {
+      if (b.quantity != null || b.amount_cents != null) return true;
+      dropped_reasons.limitations_no_valid_value =
+        (dropped_reasons.limitations_no_valid_value || 0) + 1;
+      return false;
+    }
+    return true; // "Other" fallback rows are never dropped by this filter
   });
 
   // Attach diagnostic metadata (not sent to backend as-is; caller uses it for stats)
   filtered._raw_received = rawBenefits.length;
   filtered._dropped = rawBenefits.length - filtered.length;
   filtered._dropped_reasons = dropped_reasons;
+  filtered._fallback_reasons = fallback_reason_counts;
 
   return filtered;
 }
@@ -3687,6 +3756,7 @@ async function syncODData(syncDate = null) {
       mapped_benefit_rows: 0,
       dropped_benefit_rows: 0,
       dropped_reason_counts: {},
+      fallback_reason_counts: {},
       coinsurance_rows_mapped: 0,
       deductible_rows_mapped: 0,
       limitation_rows_mapped: 0,
@@ -3800,6 +3870,11 @@ async function syncODData(syncDate = null) {
                   for (const [k, v] of Object.entries(droppedReasons)) {
                     benefitStats.dropped_reason_counts[k] =
                       (benefitStats.dropped_reason_counts[k] || 0) + v;
+                  }
+                  const fallbackReasons = benefits._fallback_reasons || {};
+                  for (const [k, v] of Object.entries(fallbackReasons)) {
+                    benefitStats.fallback_reason_counts[k] =
+                      (benefitStats.fallback_reason_counts[k] || 0) + v;
                   }
                   benefitStats.coinsurance_rows_mapped += benefits.filter(
                     (b) => b.type === "CoInsurance",

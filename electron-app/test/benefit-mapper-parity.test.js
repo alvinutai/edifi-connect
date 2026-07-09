@@ -1,10 +1,18 @@
 /**
- * Parity test: lib/benefit-mapper.js vs inline mapOdApiBenefits in main.js.
+ * Parity test: lib/benefit-mapper.js vs an independent reference implementation.
  *
- * Runs BEFORE any changes to main.js. Proves that mapBenefits() produces
- * identical output to the inline version for the same inputs.
- * Ignores `ebenefitcat` and `category_source` — these are new additive fields
- * present in benefit-mapper.js but not in the pre-v2.3.64 inline version.
+ * Proves that mapBenefits() produces identical output to a hand-written
+ * second implementation of the same (post-B-014-fix) mapping rules, for the
+ * same inputs. Ignores `ebenefitcat` and `category_source` — additive fields
+ * present in benefit-mapper.js but not reproduced in the reference below.
+ *
+ * B-014 (2026-07-09, rc.3-adapted): the reference below was updated in
+ * lockstep with the fix in lib/benefit-mapper.js / main.js — it now preserves
+ * unmapped BenefitType as "Other" (fallback_reason_counts) instead of
+ * dropping it, and uses strict non-negative numeric parsing for
+ * percent/amount/quantity. This candidate excludes 5a35003 (qualifier-aware
+ * Years/Months period synthesis), so no decimal-qualifier fallback exists
+ * here — see EDIFI-EOS\B014-DEPLOY-PACKET-2026-07-09.md.
  *
  * Run: node test/benefit-mapper-parity.test.js (from electron-app/)
  */
@@ -26,9 +34,26 @@ function test(name, fn) {
   }
 }
 
-// Simulates what the pre-v2.3.64 inline mapOdApiBenefits would produce
-// (no EbenefitCat on the row, no resolveBenefitCategory call — raw catMap lookup only).
-// Used only to establish parity baseline for the 6 sample inputs.
+function toFiniteNumberOrNull(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t === "" || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+function toNonNegativeFiniteOrNull(raw) {
+  const n = toFiniteNumberOrNull(raw);
+  return n != null && n >= 0 ? n : null;
+}
+
+// Independent, hand-written reference implementation of the post-B-014-fix
+// mapping rules (no EbenefitCat fallback, no resolveBenefitCategory call —
+// raw catMap lookup only). Used to cross-check the real mapBenefits() output
+// for the sample inputs below.
 function inlineMapper(rawBenefits, catMap) {
   const BEN_TYPE = {
     1: "CoInsurance",
@@ -66,13 +91,13 @@ function inlineMapper(rawBenefits, catMap) {
   const resolvedCatMap = catMap || COV_CAT_NUM_DEFAULTS;
   const results = [];
   const dropped_reasons = {};
+  const fallback_reason_counts = {};
 
   for (const b of rawBenefits) {
-    const type = BEN_TYPE[b.BenefitType];
-    if (!type) {
-      const key = `type_${b.BenefitType}_unmapped`;
-      dropped_reasons[key] = (dropped_reasons[key] || 0) + 1;
-      continue;
+    const type = BEN_TYPE[b.BenefitType] || "Other";
+    if (!BEN_TYPE[b.BenefitType]) {
+      const key = `type_${b.BenefitType}_unmapped_fallback`;
+      fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
     }
     // Pre-v2.3.64: category comes only from catMap, no EbenefitCat fallback on the row
     const category = resolvedCatMap[b.CovCatNum] || "GENERAL";
@@ -89,33 +114,48 @@ function inlineMapper(rawBenefits, catMap) {
     };
 
     if (type === "CoInsurance") {
-      entry.percent = Number(b.Percent);
+      entry.percent = toNonNegativeFiniteOrNull(b.Percent);
     } else if (type === "Deductible") {
-      entry.amount_cents =
-        b.MonetaryAmt != null ? Math.round(Number(b.MonetaryAmt) * 100) : null;
+      const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
-      if (b.Quantity != null) {
-        entry.quantity = b.Quantity;
+      const qty = toNonNegativeFiniteOrNull(b.Quantity);
+      if (qty != null) {
+        entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }
-      if (b.MonetaryAmt != null && Number(b.MonetaryAmt) > 0) {
-        entry.amount_cents = Math.round(Number(b.MonetaryAmt) * 100);
-      }
+      const limCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      if (limCents != null) entry.amount_cents = Math.round(limCents * 100);
     }
     results.push(entry);
   }
 
   const filtered = results.filter((b) => {
-    if (b.type === "CoInsurance") return b.percent > 0;
-    if (b.type === "Deductible") return b.amount_cents != null;
-    if (b.type === "Limitations")
-      return b.quantity != null || b.amount_cents != null;
+    if (b.type === "CoInsurance") {
+      if (b.percent != null) return true;
+      dropped_reasons.coinsurance_invalid_percent =
+        (dropped_reasons.coinsurance_invalid_percent || 0) + 1;
+      return false;
+    }
+    if (b.type === "Deductible") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.deductible_invalid_amount =
+        (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "Limitations") {
+      if (b.quantity != null || b.amount_cents != null) return true;
+      dropped_reasons.limitations_no_valid_value =
+        (dropped_reasons.limitations_no_valid_value || 0) + 1;
+      return false;
+    }
     return true;
   });
 
   filtered._raw_received = rawBenefits.length;
   filtered._dropped = rawBenefits.length - filtered.length;
   filtered._dropped_reasons = dropped_reasons;
+  filtered._fallback_reasons = fallback_reason_counts;
   return filtered;
 }
 
@@ -186,7 +226,7 @@ const SAMPLES = [
     TimePeriod: 2,
     CoverageLevel: "None",
   },
-  // Unmapped BenefitType — should be dropped
+  // Unmapped BenefitType — B-014 fix: preserved as "Other", not dropped
   {
     BenefitNum: 6,
     PlanNum: 9001,
@@ -219,6 +259,13 @@ test("_dropped_reasons matches", () => {
   assert.deepStrictEqual(
     mapperResult._dropped_reasons,
     inlineResult._dropped_reasons,
+  );
+});
+
+test("_fallback_reasons matches", () => {
+  assert.deepStrictEqual(
+    mapperResult._fallback_reasons,
+    inlineResult._fallback_reasons,
   );
 });
 
@@ -267,9 +314,19 @@ test("Limitations row → quantity=2, period=CalendarYear", () => {
   assert.strictEqual(row.period, "CalendarYear");
 });
 
-test("Unmapped BenefitType=99 dropped (_dropped=1)", () => {
-  assert.strictEqual(mapperResult._dropped, 1);
-  assert.strictEqual(mapperResult._dropped_reasons["type_99_unmapped"], 1);
+test("Unmapped BenefitType=99 preserved as Other (not dropped)", () => {
+  const row = mapperResult.find((r) => r.benefit_num === 6);
+  assert.ok(row, "unmapped BenefitType=99 row missing from output");
+  assert.strictEqual(row.type, "Other");
+  assert.strictEqual(
+    mapperResult._fallback_reasons["type_99_unmapped_fallback"],
+    1,
+  );
+  assert.strictEqual(mapperResult._dropped, 0);
+  assert.strictEqual(
+    mapperResult._dropped_reasons["type_99_unmapped"],
+    undefined,
+  );
 });
 
 // --- Additive fields present in mapper output ---
