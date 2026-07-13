@@ -23,10 +23,12 @@ const fakeRows = [
     Email: "",
   },
 ];
-const fakeConn = { query: async () => [[{ "1": 1 }]], release() {} };
+const fakeConn = { query: async () => [[{ 1: 1 }]], release() {} };
+let queryShouldThrow = false;
 const fakePool = {
   getConnection: async () => fakeConn,
   query: async (sql, params) => {
+    if (queryShouldThrow) throw new Error("ECONNREFUSED simulated DB failure");
     lastQuery = { sql, params };
     return [fakeRows];
   },
@@ -87,11 +89,11 @@ async function test(name, fn) {
     lastQuery = null;
     await odMysql.getAppointmentsForDates(["2026-07-13"]);
     // Same SELECT list, minus nothing added (no apt_date column).
-    assert.match(
-      lastQuery.sql,
-      /a\.AptNum, a\.PatNum, a\.AptDateTime/,
+    assert.match(lastQuery.sql, /a\.AptNum, a\.PatNum, a\.AptDateTime/);
+    assert.ok(
+      !/apt_date/.test(lastQuery.sql),
+      "must not add an apt_date column",
     );
-    assert.ok(!/apt_date/.test(lastQuery.sql), "must not add an apt_date column");
     assert.match(lastQuery.sql, /a\.AptStatus IN \(1, 2\)/);
   });
 
@@ -99,13 +101,20 @@ async function test(name, fn) {
     lastQuery = null;
     const rows = await odMysql.getAppointmentsForDates([]);
     assert.deepStrictEqual(rows, []);
-    assert.strictEqual(lastQuery, null, "pool.query must not run for empty input");
+    assert.strictEqual(
+      lastQuery,
+      null,
+      "pool.query must not run for empty input",
+    );
   });
 
   await test("non-array input returns [] safely", async () => {
     lastQuery = null;
     assert.deepStrictEqual(await odMysql.getAppointmentsForDates(null), []);
-    assert.deepStrictEqual(await odMysql.getAppointmentsForDates("2026-07-13"), []);
+    assert.deepStrictEqual(
+      await odMysql.getAppointmentsForDates("2026-07-13"),
+      [],
+    );
     assert.strictEqual(lastQuery, null);
   });
 
@@ -113,6 +122,24 @@ async function test(name, fn) {
     lastQuery = null;
     await odMysql.getAppointmentsForDates(["2026-07-13", "", null, 20260714]);
     assert.deepStrictEqual(lastQuery.params, [["2026-07-13"]]);
+  });
+
+  await test("DB/query failure THROWS instead of returning [] (no silent empty day)", async () => {
+    queryShouldThrow = true;
+    await assert.rejects(
+      () => odMysql.getAppointmentsForDates(["2026-07-14"]),
+      /simulated DB failure/,
+    );
+    queryShouldThrow = false;
+  });
+
+  await test("SELECT carries SQL-derived apt_local_date for safe grouping", async () => {
+    lastQuery = null;
+    await odMysql.getAppointmentsForDates(["2026-07-14"]);
+    assert.match(
+      lastQuery.sql,
+      /DATE_FORMAT\(a\.AptDateTime, '%Y-%m-%d'\) AS apt_local_date/,
+    );
   });
 
   Module.prototype.require = origRequire; // restore

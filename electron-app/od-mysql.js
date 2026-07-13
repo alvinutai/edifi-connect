@@ -94,7 +94,9 @@ function setManualMysqlConfig(cfg) {
   pool = null;
   covCatCache = null;
   codeGroupAvailable = null;
-  logger(`Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`);
+  logger(
+    `Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`,
+  );
 }
 
 // Reset availability every 5 min so transient MySQL failures don't stick permanently
@@ -503,11 +505,14 @@ async function getAppointmentsForDate(date) {
 async function getAppointmentsForDates(dates) {
   const p = await getPool();
   if (!p || !Array.isArray(dates)) return [];
-  const uniqueDates = [...new Set(dates.filter((d) => typeof d === "string" && d))];
+  const uniqueDates = [
+    ...new Set(dates.filter((d) => typeof d === "string" && d)),
+  ];
   if (uniqueDates.length === 0) return [];
   try {
     const [rows] = await p.query(
       `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              DATE_FORMAT(a.AptDateTime, '%Y-%m-%d') AS apt_local_date,
               p.FName, p.LName, p.Birthdate,
               p.HmPhone, p.WkPhone, p.Email
        FROM appointment a
@@ -519,10 +524,13 @@ async function getAppointmentsForDates(dates) {
     );
     return rows;
   } catch (e) {
+    // A DB / query failure must NOT masquerade as "no appointments" — rethrow so
+    // the caller records a real per-window failure instead of silently pushing
+    // nothing. (message is a driver error string, no PHI.)
     logger(
       `getAppointmentsForDates error (${uniqueDates.join(",")}): ${e.message}`,
     );
-    return [];
+    throw e;
   }
 }
 

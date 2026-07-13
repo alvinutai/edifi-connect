@@ -49,6 +49,7 @@ const {
 } = require("./lib/od-plan-nums");
 const {
   resolveOfficeTimezone,
+  parseLookaheadDays,
   getAppointmentDateWindow,
   groupAppointmentsByLocalDate,
   runPerDateSync,
@@ -909,10 +910,27 @@ async function handleSyncOdNow(commandId, payload) {
       );
     }
 
-    if (mysqlOk) {
-      await syncODMySql(syncDate);
-    } else {
-      await syncODData(syncDate);
+    const result = mysqlOk
+      ? await syncODMySql(syncDate)
+      : await syncODData(syncDate);
+
+    if (result && result.ok === false) {
+      // One or more dates failed — do NOT clear last_error or report a clean
+      // COMPLETED. last_error was already set by the driver.
+      sendCommandResult(
+        commandId,
+        "SYNC_OD_NOW",
+        "FAILED",
+        {
+          sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
+          dates_failed: Array.isArray(result.errors) ? result.errors.length : 1,
+          appointments: result.pushes ?? 0,
+          diagnostic: od_sync_status.last_diagnostic ?? null,
+        },
+        "SYNC_PARTIAL_FAILURE",
+        od_sync_status.last_error,
+      );
+      return;
     }
 
     od_sync_status.last_success_at = new Date().toISOString();
@@ -3864,24 +3882,24 @@ function mapOdApiBenefits(rawBenefits) {
 }
 
 async function syncODData(syncDate = null) {
-  if (!config.od_api_url || !config.office_id) return;
+  if (!config.od_api_url || !config.office_id)
+    return { ok: true, skipped: true };
   if (!tunnelOk || !tunnel) {
     log("[OD Sync] Skipped — tunnel not connected");
-    return;
+    return { ok: true, skipped: true };
   }
 
   const tzResolution = validateOfficeTimezoneConfig();
   const tz = tzResolution.timezone;
+  const effectiveLookahead = parseLookaheadDays(
+    config.appointment_sync_lookahead_days,
+  );
   const dates = syncDate
     ? [syncDate]
-    : getAppointmentDateWindow(
-        tz,
-        config.appointment_sync_lookahead_days,
-        new Date(),
-      );
+    : getAppointmentDateWindow(tz, effectiveLookahead, new Date());
 
   log(
-    `[OD Sync] Window: ${dates.join(", ")} (lookahead=${config.appointment_sync_lookahead_days}, tz=${tz}, source=${tzResolution.source})`,
+    `[OD Sync] Window: ${dates.join(", ")} (lookahead=${effectiveLookahead}, tz=${tz}, source=${tzResolution.source})`,
   );
 
   // Refresh coverage / procedure-code / code-group caches once for the whole
@@ -3891,18 +3909,35 @@ async function syncODData(syncDate = null) {
   odCodeGroupCache = null; // 6E: code groups added in OD resolve without a restart
 
   const perDateDiagnostics = [];
-  await runPerDateSync(dates, async (date) => {
-    await syncODDataForDate(date);
+  const { pushes, errors } = await runPerDateSync(dates, async (date) => {
+    const n = await syncODDataForDate(date);
     if (od_sync_status.last_diagnostic) {
       perDateDiagnostics.push({ ...od_sync_status.last_diagnostic });
     }
-    return 0;
+    return n || 0;
   });
 
+  od_sync_status.last_counts = {
+    appointments: pushes,
+    dates_synced: dates.length,
+  };
   od_sync_status.last_diagnostic = {
     dates_used: dates,
     per_date_diagnostics: perDateDiagnostics,
   };
+
+  if (errors.length > 0) {
+    // A later date's success must never hide an earlier date's failure.
+    od_sync_status.last_error =
+      `${errors.length}/${dates.length} dates failed: ${errors
+        .map((e) => `${e.date} (${e.msg})`)
+        .join("; ")}`.slice(0, 200);
+    log(`[OD Sync] Completed with errors: ${od_sync_status.last_error}`);
+    return { ok: false, errors, pushes };
+  }
+  od_sync_status.last_success_at = new Date().toISOString();
+  od_sync_status.last_error = null;
+  return { ok: true, errors: [], pushes };
 }
 
 async function syncODDataForDate(today) {
@@ -4223,8 +4258,13 @@ async function syncODDataForDate(today) {
         appointments: enriched,
       }),
     );
+    return 1;
   } catch (e) {
-    log(`[OD Sync] Error: ${e.message}`);
+    // Surface the failure to runPerDateSync so a REST error for this date is
+    // recorded, not silently swallowed. Zero-appointment days return normally
+    // (0) above and are treated as a successful empty result.
+    log(`[OD Sync] Error for ${today}: ${e.message}`);
+    throw e;
   }
 }
 
@@ -4236,41 +4276,48 @@ async function syncODDataForDate(today) {
 async function syncODMySql(syncDate) {
   if (!tunnelOk || !tunnel) {
     log("[OD MySQL Sync] Skipped — tunnel not connected");
-    return;
+    return { ok: true, skipped: true };
   }
   if (!(await isMysqlAvailable())) {
     log("[OD MySQL Sync] MySQL not available — skipping");
-    return;
+    return { ok: true, skipped: true };
   }
 
   const tzResolution = validateOfficeTimezoneConfig();
   const tz = tzResolution.timezone;
+  const effectiveLookahead = parseLookaheadDays(
+    config.appointment_sync_lookahead_days,
+  );
   const dates = syncDate
     ? [syncDate]
-    : getAppointmentDateWindow(
-        tz,
-        config.appointment_sync_lookahead_days,
-        new Date(),
-      );
+    : getAppointmentDateWindow(tz, effectiveLookahead, new Date());
 
   od_sync_status.last_attempt_at = new Date().toISOString();
   log(
-    `[OD MySQL Sync] Window: ${dates.join(", ")} (lookahead=${config.appointment_sync_lookahead_days}, tz=${tz}, source=${tzResolution.source})`,
+    `[OD MySQL Sync] Window: ${dates.join(", ")} (lookahead=${effectiveLookahead}, tz=${tz}, source=${tzResolution.source})`,
   );
 
   let allApts;
   try {
     allApts = await getAppointmentsForDates(dates);
   } catch (e) {
+    // DB/query failure fails the whole window (single combined query) — report
+    // it as a real failure; do not fall through as an empty "success".
     od_sync_status.last_error = e.message.slice(0, 200);
     log(`[OD MySQL Sync] Error: ${e.message}`);
-    return;
+    return {
+      ok: false,
+      errors: [{ date: dates.join(","), msg: e.message }],
+      pushes: 0,
+    };
   }
   if (allApts.length === 0) {
     log(
       `[OD MySQL Sync] No scheduled appointments for window ${dates.join(", ")}`,
     );
-    return;
+    od_sync_status.last_success_at = new Date().toISOString();
+    od_sync_status.last_error = null;
+    return { ok: true, errors: [], pushes: 0 };
   }
 
   // Group by office-local date so we emit exactly one OD_DATA_PUSH per date.
@@ -4288,14 +4335,16 @@ async function syncODMySql(syncDate) {
   };
   if (errors.length > 0) {
     // A later date's success must never hide an earlier date's failure.
-    od_sync_status.last_error = `${errors.length}/${dates.length} dates failed: ${errors
-      .map((e) => `${e.date} (${e.msg})`)
-      .join("; ")}`.slice(0, 200);
+    od_sync_status.last_error =
+      `${errors.length}/${dates.length} dates failed: ${errors
+        .map((e) => `${e.date} (${e.msg})`)
+        .join("; ")}`.slice(0, 200);
     log(`[OD MySQL Sync] Completed with errors: ${od_sync_status.last_error}`);
-  } else {
-    od_sync_status.last_success_at = new Date().toISOString();
-    od_sync_status.last_error = null;
+    return { ok: false, errors, pushes };
   }
+  od_sync_status.last_success_at = new Date().toISOString();
+  od_sync_status.last_error = null;
+  return { ok: true, errors: [], pushes };
 }
 
 // One office-local date: enrich each appointment and emit a single
@@ -4325,10 +4374,7 @@ async function syncODMySqlForDate(targetDate, apts) {
             (s, pr) => s + pr.estimated_patient_portion_cents,
             0,
           );
-          feeApptCents = procs.reduce(
-            (s, pr) => s + pr.procedure_fee_cents,
-            0,
-          );
+          feeApptCents = procs.reduce((s, pr) => s + pr.procedure_fee_cents, 0);
           log(
             `[OD MySQL Sync] Appointment procedure estimate collected (${procs.length} item(s))`,
           );

@@ -7,6 +7,8 @@
 const assert = require("assert");
 const {
   DEFAULT_LOOKAHEAD_DAYS,
+  MAX_LOOKAHEAD_DAYS,
+  parseLookaheadDays,
   resolveOfficeTimezone,
   getOfficeLocalDateISO,
   getAppointmentDateWindow,
@@ -147,20 +149,20 @@ function assertConsecutive(dates) {
   });
 
   await test("resolveOfficeTimezone(garbage) → UTC fallback", () => {
-    assert.strictEqual(resolveOfficeTimezone("Not/AZone").source, "utc_fallback");
+    assert.strictEqual(
+      resolveOfficeTimezone("Not/AZone").source,
+      "utc_fallback",
+    );
     assert.strictEqual(resolveOfficeTimezone("").source, "utc_fallback");
   });
 
-  await test(
-    "default config (tz unset, lookahead 0) matches old UTC today — no fleet behavior change",
-    () => {
-      const { timezone } = resolveOfficeTimezone(null); // UTC
-      const anchor = new Date("2026-07-13T23:30:00Z");
-      const w = getAppointmentDateWindow(timezone, 0, anchor);
-      // Old code used new Date().toISOString().split("T")[0] — UTC calendar date.
-      assert.deepStrictEqual(w, [anchor.toISOString().slice(0, 10)]);
-    },
-  );
+  await test("default config (tz unset, lookahead 0) matches old UTC today — no fleet behavior change", () => {
+    const { timezone } = resolveOfficeTimezone(null); // UTC
+    const anchor = new Date("2026-07-13T23:30:00Z");
+    const w = getAppointmentDateWindow(timezone, 0, anchor);
+    // Old code used new Date().toISOString().split("T")[0] — UTC calendar date.
+    assert.deepStrictEqual(w, [anchor.toISOString().slice(0, 10)]);
+  });
 
   // ─── MySQL grouping (JS Date AptDateTime → string keys) ─────────────────────
 
@@ -245,6 +247,88 @@ function assertConsecutive(dates) {
   await test("runPerDateSync handles a non-array safely", async () => {
     const r = await runPerDateSync(null, async () => 1);
     assert.deepStrictEqual(r, { pushes: 0, errors: [], datesRun: [] });
+  });
+
+  // ── parseLookaheadDays: the single canonical config parser ────────────────
+  await test("parseLookaheadDays: numeric 2 -> 2", () => {
+    assert.strictEqual(parseLookaheadDays(2), 2);
+  });
+  await test('parseLookaheadDays: string "2" -> 2', () => {
+    assert.strictEqual(parseLookaheadDays("2"), 2);
+  });
+  await test("parseLookaheadDays: missing/undefined -> 0", () => {
+    assert.strictEqual(parseLookaheadDays(undefined), 0);
+  });
+  await test("parseLookaheadDays: null -> 0", () => {
+    assert.strictEqual(parseLookaheadDays(null), 0);
+  });
+  await test("parseLookaheadDays: empty string -> 0", () => {
+    assert.strictEqual(parseLookaheadDays(""), 0);
+  });
+  await test("parseLookaheadDays: malformed string -> 0", () => {
+    assert.strictEqual(parseLookaheadDays("abc"), 0);
+    assert.strictEqual(parseLookaheadDays("2abc"), 0);
+  });
+  await test("parseLookaheadDays: negative -> 0", () => {
+    assert.strictEqual(parseLookaheadDays(-1), 0);
+    assert.strictEqual(parseLookaheadDays("-3"), 0);
+  });
+  await test("parseLookaheadDays: fractional floors to int", () => {
+    assert.strictEqual(parseLookaheadDays(2.7), 2);
+    assert.strictEqual(parseLookaheadDays("2.9"), 2);
+  });
+  await test("parseLookaheadDays: above max clamps to MAX_LOOKAHEAD_DAYS", () => {
+    assert.strictEqual(
+      parseLookaheadDays(MAX_LOOKAHEAD_DAYS + 5),
+      MAX_LOOKAHEAD_DAYS,
+    );
+  });
+  await test("parseLookaheadDays: extreme value clamps to max", () => {
+    assert.strictEqual(parseLookaheadDays(1e9), MAX_LOOKAHEAD_DAYS);
+    assert.strictEqual(parseLookaheadDays("999999"), MAX_LOOKAHEAD_DAYS);
+  });
+  await test("parseLookaheadDays: zero -> 0 (today only)", () => {
+    assert.strictEqual(parseLookaheadDays(0), 0);
+  });
+  await test('getAppointmentDateWindow honors string "2" (today + 2 = 3 dates)', () => {
+    const w = getAppointmentDateWindow(
+      "America/Denver",
+      "2",
+      new Date("2026-07-14T18:00:00Z"),
+    );
+    assert.strictEqual(w.length, 3);
+  });
+  await test("getAppointmentDateWindow clamps extreme lookahead to max+1 dates", () => {
+    const w = getAppointmentDateWindow(
+      "UTC",
+      999,
+      new Date("2026-07-14T12:00:00Z"),
+    );
+    assert.strictEqual(w.length, MAX_LOOKAHEAD_DAYS + 1);
+  });
+
+  // ── SQL-derived local date grouping (near-midnight safety) ────────────────
+  await test("groupAppointmentsByLocalDate prefers apt_local_date over JS Date tz", () => {
+    // The AptDateTime instant could bucket to a different day under a shifted
+    // host tz, but the SQL-derived apt_local_date string is authoritative.
+    const apts = [
+      {
+        AptDateTime: new Date("2026-07-15T05:30:00.000Z"),
+        apt_local_date: "2026-07-14",
+      },
+      {
+        AptDateTime: new Date("2026-07-15T18:00:00.000Z"),
+        apt_local_date: "2026-07-15",
+      },
+    ];
+    const g = groupAppointmentsByLocalDate(apts, "America/Denver");
+    assert.strictEqual(g.get("2026-07-14").length, 1);
+    assert.strictEqual(g.get("2026-07-15").length, 1);
+  });
+  await test("groupAppointmentsByLocalDate falls back to tz when apt_local_date absent", () => {
+    const apts = [{ AptDateTime: new Date("2026-07-15T18:00:00.000Z") }];
+    const g = groupAppointmentsByLocalDate(apts, "UTC");
+    assert.strictEqual(g.get("2026-07-15").length, 1);
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

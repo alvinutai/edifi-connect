@@ -7,6 +7,25 @@
 // (e.g. 2 = today + next 2 days). Malformed/negative/missing collapses to 0.
 const DEFAULT_LOOKAHEAD_DAYS = 0;
 
+// Hard ceiling: a bad config value can never create an unbounded sync fan-out.
+const MAX_LOOKAHEAD_DAYS = 14;
+
+/**
+ * Canonical lookahead parser — the ONLY place lookahead is normalized, so no
+ * caller parses independently. Accepts numbers and numeric strings ("2" -> 2).
+ * Anything not a finite, non-negative number collapses to 0 (today-only);
+ * fractions floor to int; values above MAX_LOOKAHEAD_DAYS clamp to the ceiling.
+ *   2 -> 2 | "2" -> 2 | 2.7 -> 2 | -1 -> 0 | "abc" -> 0 | "" -> 0
+ *   null -> 0 | undefined -> 0 | 999 -> 14
+ * @param {unknown} rawValue
+ * @returns {number} integer in [0, MAX_LOOKAHEAD_DAYS]
+ */
+function parseLookaheadDays(rawValue) {
+  const n = Number(rawValue);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_LOOKAHEAD_DAYS;
+  return Math.min(Math.floor(n), MAX_LOOKAHEAD_DAYS);
+}
+
 /**
  * Validate an IANA timezone string.
  * @param {string|undefined|null} tz
@@ -96,11 +115,8 @@ function getAppointmentDateWindow(
   lookaheadDays = DEFAULT_LOOKAHEAD_DAYS,
   anchor = new Date(),
 ) {
-  // Fail-safe: anything not a finite non-negative number collapses to today-only.
-  const days =
-    Number.isFinite(lookaheadDays) && lookaheadDays >= 0
-      ? Math.floor(lookaheadDays)
-      : DEFAULT_LOOKAHEAD_DAYS;
+  // Normalize via the single canonical parser (accepts "2", clamps to max).
+  const days = parseLookaheadDays(lookaheadDays);
 
   const localToday = getOfficeLocalDateISO(tz, anchor);
   const dates = [localToday];
@@ -137,7 +153,14 @@ function resolveOfficeTimezone(rawValue) {
 function groupAppointmentsByLocalDate(apts, tz) {
   const byDate = new Map();
   for (const apt of apts) {
-    const aptDate = getOfficeLocalDateISO(tz, new Date(apt.AptDateTime));
+    // Prefer the DB-derived local date string (DATE_FORMAT(AptDateTime) from the
+    // SQL query) so a host-timezone mismatch in mysql2's Date parsing can never
+    // move a near-midnight appointment to the wrong day. Fall back to tz
+    // conversion for rows that don't carry it (e.g. REST-shaped inputs).
+    const aptDate =
+      typeof apt.apt_local_date === "string" && apt.apt_local_date
+        ? apt.apt_local_date
+        : getOfficeLocalDateISO(tz, new Date(apt.AptDateTime));
     if (!byDate.has(aptDate)) byDate.set(aptDate, []);
     byDate.get(aptDate).push(apt);
   }
@@ -176,6 +199,8 @@ async function runPerDateSync(dates, syncOne) {
 
 module.exports = {
   DEFAULT_LOOKAHEAD_DAYS,
+  MAX_LOOKAHEAD_DAYS,
+  parseLookaheadDays,
   isValidTimezone,
   resolveOfficeTimezone,
   getOfficeLocalDateISO,
