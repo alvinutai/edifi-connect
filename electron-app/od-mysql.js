@@ -495,6 +495,37 @@ async function getAppointmentsForDate(date) {
   }
 }
 
+// Multi-date variant — fetches every requested office-local date in one query.
+// Same row shape as getAppointmentsForDate. Parameterized IN-list (mysql2
+// expands an array bound to a single ? placeholder into a safe placeholder
+// list), so no value is ever interpolated into SQL. Dates are de-duplicated;
+// a non-array or empty list returns [] without touching the pool.
+async function getAppointmentsForDates(dates) {
+  const p = await getPool();
+  if (!p || !Array.isArray(dates)) return [];
+  const uniqueDates = [...new Set(dates.filter((d) => typeof d === "string" && d))];
+  if (uniqueDates.length === 0) return [];
+  try {
+    const [rows] = await p.query(
+      `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              p.FName, p.LName, p.Birthdate,
+              p.HmPhone, p.WkPhone, p.Email
+       FROM appointment a
+       JOIN patient p ON p.PatNum = a.PatNum
+       WHERE DATE(a.AptDateTime) IN (?)
+         AND a.AptStatus IN (1, 2)
+       ORDER BY a.AptDateTime`,
+      [uniqueDates],
+    );
+    return rows;
+  } catch (e) {
+    logger(
+      `getAppointmentsForDates error (${uniqueDates.join(",")}): ${e.message}`,
+    );
+    return [];
+  }
+}
+
 // Backward-compatible wrapper
 async function getAppointmentsToday() {
   return getAppointmentsForDate(null);
@@ -768,6 +799,7 @@ module.exports = {
   probeCodeGroupSupport,
   getPatNumByNameDOB,
   getAppointmentsForDate,
+  getAppointmentsForDates,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,

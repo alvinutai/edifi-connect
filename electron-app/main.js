@@ -19,6 +19,7 @@ const {
   getBenefitsForPatient,
   getPatNumByNameDOB,
   getAppointmentsForDate,
+  getAppointmentsForDates,
   getAppointmentsToday,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
@@ -46,6 +47,12 @@ const {
   sanitizePatientPlanRestRow,
   sanitizePatientPlanMysqlRow,
 } = require("./lib/od-plan-nums");
+const {
+  resolveOfficeTimezone,
+  getAppointmentDateWindow,
+  groupAppointmentsByLocalDate,
+  runPerDateSync,
+} = require("./lib/appointment-window");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -84,6 +91,13 @@ let config = {
   // OD MySQL write-path credentials — set via SET_MYSQL_CONFIG remote command.
   // Stored in config.json on the local machine only. Never transmitted in logs.
   od_mysql: null,
+  // Office-local IANA timezone (e.g. "America/Denver"). Unset → UTC fallback.
+  // Set via local config only; never transmitted as raw PHI.
+  office_timezone: null,
+  // Days beyond today to sync appointments for proactive readiness.
+  // 0 = today only (backward compatible, no fleet behavior change).
+  // 2 = today + next 2 days. Malformed/negative/missing collapses to 0.
+  appointment_sync_lookahead_days: 0,
 };
 
 // ─── Remote control state (never contains credentials or PHI) ─────────────────
@@ -422,13 +436,35 @@ function getMachineIdHash() {
 }
 
 function getSafeConfigStatus() {
+  const tzResolution = resolveOfficeTimezone(config.office_timezone);
   return {
     office_id_present: !!config.office_id,
     od_mysql_config_present: false, // set below after mysql check
     od_api_url_present: !!config.od_api_url,
     portal_sessions_count: activeSessions().length,
     has_bridge_url: !!EDIFI_CLOUD_WS,
+    office_timezone_source: tzResolution.source,
+    office_timezone_valid: tzResolution.source === "config",
   };
+}
+
+// Validate office_timezone config and emit a loud warning if we fall back to
+// UTC. Called once at startup and before each appointment sync window. Returns
+// the resolved timezone object for convenience.
+function validateOfficeTimezoneConfig() {
+  const resolution = resolveOfficeTimezone(config.office_timezone);
+  if (resolution.source === "utc_fallback") {
+    log(
+      `[Timezone] WARNING: office_timezone is missing or invalid (${JSON.stringify(config.office_timezone)}). ` +
+        `Falling back to UTC. Appointment sync may use the wrong calendar date for offices far from UTC. ` +
+        `Set office_timezone in config.json to the office IANA timezone (e.g. "America/Denver").`,
+    );
+  } else {
+    log(
+      `[Timezone] Using office timezone: ${resolution.timezone} (source: ${resolution.source})`,
+    );
+  }
+  return resolution;
 }
 
 async function sendAgentHello() {
@@ -3834,10 +3870,42 @@ async function syncODData(syncDate = null) {
     return;
   }
 
-  odCovCatCache = null; // refresh category map each sync — office may have added categories
-  odProcCodeCache = null; // 6D-1B: same lifetime — codes added in OD resolve without a restart
-  odCodeGroupCache = null; // 6E: same lifetime — code groups added in OD resolve without a restart
-  const today = syncDate ?? new Date().toISOString().split("T")[0];
+  const tzResolution = validateOfficeTimezoneConfig();
+  const tz = tzResolution.timezone;
+  const dates = syncDate
+    ? [syncDate]
+    : getAppointmentDateWindow(
+        tz,
+        config.appointment_sync_lookahead_days,
+        new Date(),
+      );
+
+  log(
+    `[OD Sync] Window: ${dates.join(", ")} (lookahead=${config.appointment_sync_lookahead_days}, tz=${tz}, source=${tzResolution.source})`,
+  );
+
+  // Refresh coverage / procedure-code / code-group caches once for the whole
+  // window — dates after the first reuse the warmed caches.
+  odCovCatCache = null; // office may have added categories
+  odProcCodeCache = null; // 6D-1B: codes added in OD resolve without a restart
+  odCodeGroupCache = null; // 6E: code groups added in OD resolve without a restart
+
+  const perDateDiagnostics = [];
+  await runPerDateSync(dates, async (date) => {
+    await syncODDataForDate(date);
+    if (od_sync_status.last_diagnostic) {
+      perDateDiagnostics.push({ ...od_sync_status.last_diagnostic });
+    }
+    return 0;
+  });
+
+  od_sync_status.last_diagnostic = {
+    dates_used: dates,
+    per_date_diagnostics: perDateDiagnostics,
+  };
+}
+
+async function syncODDataForDate(today) {
   log(`[OD Sync] Starting for ${today}...`);
 
   const endpoint = `/appointments?date=${today}`;
@@ -4175,99 +4243,143 @@ async function syncODMySql(syncDate) {
     return;
   }
 
-  const targetDate = syncDate || new Date().toISOString().slice(0, 10);
+  const tzResolution = validateOfficeTimezoneConfig();
+  const tz = tzResolution.timezone;
+  const dates = syncDate
+    ? [syncDate]
+    : getAppointmentDateWindow(
+        tz,
+        config.appointment_sync_lookahead_days,
+        new Date(),
+      );
+
   od_sync_status.last_attempt_at = new Date().toISOString();
-  log(`[OD MySQL Sync] Starting direct MySQL sync for ${targetDate}...`);
+  log(
+    `[OD MySQL Sync] Window: ${dates.join(", ")} (lookahead=${config.appointment_sync_lookahead_days}, tz=${tz}, source=${tzResolution.source})`,
+  );
+
+  let allApts;
   try {
-    const apts = await getAppointmentsForDate(targetDate);
-    if (apts.length === 0) {
-      log(`[OD MySQL Sync] No scheduled appointments for ${targetDate}`);
-      return;
-    }
-
-    log(
-      `[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`,
-    );
-    const enriched = [];
-    for (const apt of apts) {
-      try {
-        const snapshot = await getPatientInsuranceSnapshot(apt.PatNum);
-        if (!snapshot) continue;
-
-        // Pull procedure fee estimates — fail-open so a missing procedurelog
-        // table or query error never blocks the insurance sync.
-        let procCodes = [];
-        let estPatientCents = 0;
-        let feeApptCents = 0;
-        try {
-          const procs = await getAppointmentProcedures(apt.AptNum);
-          if (procs.length > 0) {
-            procCodes = procs.map((pr) => pr.procedure_code);
-            estPatientCents = procs.reduce(
-              (s, pr) => s + pr.estimated_patient_portion_cents,
-              0,
-            );
-            feeApptCents = procs.reduce(
-              (s, pr) => s + pr.procedure_fee_cents,
-              0,
-            );
-            log(
-              `[OD MySQL Sync] Appointment procedure estimate collected (${procs.length} item(s))`,
-            );
-          }
-        } catch (procErr) {
-          log(
-            `[OD MySQL Sync] Procedure fetch skipped — continuing sync: ${procErr.message}`,
-          );
-        }
-
-        enriched.push({
-          AptNum: apt.AptNum,
-          PatNum: apt.PatNum,
-          AptDateTime: apt.AptDateTime,
-          patient: {
-            FName: apt.FName,
-            LName: apt.LName,
-            Birthdate: apt.Birthdate,
-            HmPhone: apt.HmPhone,
-            WkPhone: apt.WkPhone,
-            Email: apt.Email,
-          },
-          insurance: snapshot.plans,
-          benefits: snapshot.benefits,
-          proc_codes: procCodes,
-          est_patient_cents: estPatientCents,
-          fee_appt_cents: feeApptCents,
-          source: "od_mysql",
-        });
-      } catch (e) {
-        log(`[OD MySQL Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
-      }
-    }
-
-    if (enriched.length === 0) {
-      log("[OD MySQL Sync] No insurance data found");
-      return;
-    }
-
-    log(
-      `[OD MySQL Sync] Pushing ${enriched.length} appointments to EDiFi Cloud...`,
-    );
-    tunnel.send(
-      JSON.stringify({
-        type: "OD_DATA_PUSH",
-        date: targetDate,
-        appointments: enriched,
-        source: "od_mysql",
-      }),
-    );
-    od_sync_status.last_success_at = new Date().toISOString();
-    od_sync_status.last_error = null;
-    od_sync_status.last_counts = { appointments: enriched.length };
+    allApts = await getAppointmentsForDates(dates);
   } catch (e) {
     od_sync_status.last_error = e.message.slice(0, 200);
     log(`[OD MySQL Sync] Error: ${e.message}`);
+    return;
   }
+  if (allApts.length === 0) {
+    log(
+      `[OD MySQL Sync] No scheduled appointments for window ${dates.join(", ")}`,
+    );
+    return;
+  }
+
+  // Group by office-local date so we emit exactly one OD_DATA_PUSH per date.
+  const aptsByDate = groupAppointmentsByLocalDate(allApts, tz);
+
+  const { pushes, errors } = await runPerDateSync(dates, async (date) => {
+    const apts = aptsByDate.get(date) || [];
+    if (apts.length === 0) return 0;
+    return syncODMySqlForDate(date, apts);
+  });
+
+  od_sync_status.last_counts = {
+    appointments: pushes,
+    dates_synced: dates.length,
+  };
+  if (errors.length > 0) {
+    // A later date's success must never hide an earlier date's failure.
+    od_sync_status.last_error = `${errors.length}/${dates.length} dates failed: ${errors
+      .map((e) => `${e.date} (${e.msg})`)
+      .join("; ")}`.slice(0, 200);
+    log(`[OD MySQL Sync] Completed with errors: ${od_sync_status.last_error}`);
+  } else {
+    od_sync_status.last_success_at = new Date().toISOString();
+    od_sync_status.last_error = null;
+  }
+}
+
+// One office-local date: enrich each appointment and emit a single
+// OD_DATA_PUSH. Returns the count pushed. Per-appointment failures are
+// isolated (logged, skipped); a failure outside the loop throws so the caller
+// records it per date without aborting the rest of the window.
+async function syncODMySqlForDate(targetDate, apts) {
+  log(
+    `[OD MySQL Sync] ${apts.length} appointments for ${targetDate} — pulling insurance snapshots...`,
+  );
+  const enriched = [];
+  for (const apt of apts) {
+    try {
+      const snapshot = await getPatientInsuranceSnapshot(apt.PatNum);
+      if (!snapshot) continue;
+
+      // Pull procedure fee estimates — fail-open so a missing procedurelog
+      // table or query error never blocks the insurance sync.
+      let procCodes = [];
+      let estPatientCents = 0;
+      let feeApptCents = 0;
+      try {
+        const procs = await getAppointmentProcedures(apt.AptNum);
+        if (procs.length > 0) {
+          procCodes = procs.map((pr) => pr.procedure_code);
+          estPatientCents = procs.reduce(
+            (s, pr) => s + pr.estimated_patient_portion_cents,
+            0,
+          );
+          feeApptCents = procs.reduce(
+            (s, pr) => s + pr.procedure_fee_cents,
+            0,
+          );
+          log(
+            `[OD MySQL Sync] Appointment procedure estimate collected (${procs.length} item(s))`,
+          );
+        }
+      } catch (procErr) {
+        log(
+          `[OD MySQL Sync] Procedure fetch skipped — continuing sync: ${procErr.message}`,
+        );
+      }
+
+      enriched.push({
+        AptNum: apt.AptNum,
+        PatNum: apt.PatNum,
+        AptDateTime: apt.AptDateTime,
+        patient: {
+          FName: apt.FName,
+          LName: apt.LName,
+          Birthdate: apt.Birthdate,
+          HmPhone: apt.HmPhone,
+          WkPhone: apt.WkPhone,
+          Email: apt.Email,
+        },
+        insurance: snapshot.plans,
+        benefits: snapshot.benefits,
+        proc_codes: procCodes,
+        est_patient_cents: estPatientCents,
+        fee_appt_cents: feeApptCents,
+        source: "od_mysql",
+      });
+    } catch (e) {
+      log(`[OD MySQL Sync] Skipping PatNum ${apt.PatNum}: ${e.message}`);
+    }
+  }
+
+  if (enriched.length === 0) {
+    log(`[OD MySQL Sync] No insurance data found for ${targetDate}`);
+    return 0;
+  }
+
+  log(
+    `[OD MySQL Sync] Pushing ${enriched.length} appointments for ${targetDate} to EDiFi Cloud...`,
+  );
+  tunnel.send(
+    JSON.stringify({
+      type: "OD_DATA_PUSH",
+      date: targetDate,
+      appointments: enriched,
+      source: "od_mysql",
+    }),
+  );
+  return enriched.length;
 }
 
 /**
@@ -5332,6 +5444,10 @@ ipcMain.handle("open-external", (_, url) => {
 
 app.whenReady().then(() => {
   loadConfig();
+
+  // Validate office timezone early and loudly. UTC fallback is safe but wrong
+  // for offices far from UTC, so surface it in logs and safe_config_status.
+  validateOfficeTimezoneConfig();
 
   // Wire OD MySQL logger to main app log — failures now show in edifi-connect.log
   setMysqlLogger((msg) => log(`[OD MySQL] ${msg}`));
