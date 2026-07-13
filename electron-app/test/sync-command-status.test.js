@@ -74,7 +74,7 @@ test("failure with zero pushes → FAILED with appointmentCount 0", () => {
   assert.strictEqual(d.appointmentCount, 0);
 });
 
-test("malformed result (null) fails safe — FAILED, no clear", () => {
+test("malformed result (null) fails closed — FAILED, 1/0, no clear", () => {
   const d = decideSyncCommandStatus(null);
   assert.strictEqual(d.commandStatus, "FAILED");
   assert.strictEqual(d.clearLastError, false);
@@ -82,10 +82,27 @@ test("malformed result (null) fails safe — FAILED, no clear", () => {
   assert.strictEqual(d.appointmentCount, 0);
 });
 
-test("malformed result (missing ok) fails safe — FAILED, no clear", () => {
+test("malformed (missing ok) fails closed — never carries stray pushes", () => {
   const d = decideSyncCommandStatus({ pushes: 5 });
   assert.strictEqual(d.commandStatus, "FAILED");
   assert.strictEqual(d.clearLastError, false);
+  assert.strictEqual(d.datesFailed, 1);
+  assert.strictEqual(d.appointmentCount, 0); // NOT 5
+});
+
+test("malformed (missing ok, errors:[]) fails closed — 1 failed, 0 appts", () => {
+  const d = decideSyncCommandStatus({ errors: [], pushes: 5 });
+  assert.strictEqual(d.commandStatus, "FAILED");
+  assert.strictEqual(d.datesFailed, 1); // NOT 0
+  assert.strictEqual(d.appointmentCount, 0); // NOT 5
+});
+
+test("malformed (non-boolean ok) fails closed — 1/0", () => {
+  const d = decideSyncCommandStatus({ ok: "yes", errors: [{}], pushes: 3 });
+  assert.strictEqual(d.commandStatus, "FAILED");
+  assert.strictEqual(d.clearLastError, false);
+  assert.strictEqual(d.datesFailed, 1);
+  assert.strictEqual(d.appointmentCount, 0);
 });
 
 test("ok:false is the ONLY thing that fails when object well-formed", () => {

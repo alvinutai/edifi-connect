@@ -10,37 +10,47 @@
  * This helper owns ONLY that mapping. It performs no I/O, logging, WebSocket,
  * Electron, database, or Open Dental work — callers keep all of that.
  *
- * Input is the normalized sync result returned by syncODData / syncODMySql:
+ * Three explicit, mutually exclusive cases so the fail-safe split is mechanical:
  *   { ok: true,  skipped: true }            — sync skipped, treated as success
  *   { ok: true,  errors: [], pushes: N }    — every requested date succeeded
- *   { ok: false, errors: [...], pushes: N } — at least one date failed
- *
- * A missing / malformed result fails safe (FAILED, last_error preserved) rather
- * than risk reporting a clean completion the sync did not earn. Real callers
- * never return that shape, so behavior is identical to commit 7f98acd for every
+ *   { ok: false, errors: [...], pushes: N } — well-formed failure, N pushed
+ * Anything else (null, undefined, non-object, missing/non-boolean `ok`) is a
+ * MALFORMED result and fails closed to a generic single failure — it must never
+ * carry over a stray `pushes` or report zero failed dates. Real callers never
+ * return that shape, so behavior is identical to commit 7f98acd for every
  * result the code actually produces.
  */
 function decideSyncCommandStatus(result) {
-  const isSuccess = !!result && result.ok === true;
-  const pushes = result != null && result.pushes != null ? result.pushes : 0;
+  const isObject = !!result && typeof result === "object";
+  const pushCount = (r) => (r.pushes != null ? r.pushes : 0); // mirrors `?? 0`
 
-  if (isSuccess) {
+  if (isObject && result.ok === true) {
     return {
       commandStatus: "COMPLETED",
       clearLastError: true,
       errorCode: null,
       datesFailed: 0,
-      appointmentCount: pushes,
+      appointmentCount: pushCount(result),
     };
   }
 
-  const errors = result && Array.isArray(result.errors) ? result.errors : null;
+  if (isObject && result.ok === false) {
+    return {
+      commandStatus: "FAILED",
+      clearLastError: false,
+      errorCode: "SYNC_PARTIAL_FAILURE",
+      datesFailed: Array.isArray(result.errors) ? result.errors.length : 1,
+      appointmentCount: pushCount(result),
+    };
+  }
+
+  // Malformed / missing result — fail closed, no carried-over counts.
   return {
     commandStatus: "FAILED",
     clearLastError: false,
     errorCode: "SYNC_PARTIAL_FAILURE",
-    datesFailed: errors ? errors.length : 1,
-    appointmentCount: pushes,
+    datesFailed: 1,
+    appointmentCount: 0,
   };
 }
 
