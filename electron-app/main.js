@@ -54,6 +54,7 @@ const {
   groupAppointmentsByLocalDate,
   runPerDateSync,
 } = require("./lib/appointment-window");
+const { decideSyncCommandStatus } = require("./lib/sync-command-status");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -914,7 +915,10 @@ async function handleSyncOdNow(commandId, payload) {
       ? await syncODMySql(syncDate)
       : await syncODData(syncDate);
 
-    if (result && result.ok === false) {
+    const decision = decideSyncCommandStatus(result);
+    const sync_method = mysqlOk ? "od_mysql" : "od_rest_api";
+
+    if (decision.commandStatus === "FAILED") {
       // One or more dates failed — do NOT clear last_error or report a clean
       // COMPLETED. last_error was already set by the driver.
       sendCommandResult(
@@ -922,22 +926,22 @@ async function handleSyncOdNow(commandId, payload) {
         "SYNC_OD_NOW",
         "FAILED",
         {
-          sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
-          dates_failed: Array.isArray(result.errors) ? result.errors.length : 1,
-          appointments: result.pushes ?? 0,
+          sync_method,
+          dates_failed: decision.datesFailed,
+          appointments: decision.appointmentCount,
           diagnostic: od_sync_status.last_diagnostic ?? null,
         },
-        "SYNC_PARTIAL_FAILURE",
+        decision.errorCode,
         od_sync_status.last_error,
       );
       return;
     }
 
     od_sync_status.last_success_at = new Date().toISOString();
-    od_sync_status.last_error = null;
+    if (decision.clearLastError) od_sync_status.last_error = null;
 
     sendCommandResult(commandId, "SYNC_OD_NOW", "COMPLETED", {
-      sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
+      sync_method,
       completed_at: od_sync_status.last_success_at,
       last_auth_error: od_sync_status.last_auth_error ?? null,
       diagnostic: od_sync_status.last_diagnostic ?? null,
