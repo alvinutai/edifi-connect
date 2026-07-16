@@ -55,6 +55,7 @@ const {
   runPerDateSync,
 } = require("./lib/appointment-window");
 const { decideSyncCommandStatus } = require("./lib/sync-command-status");
+const { resolveEConnectorTryList } = require("./lib/econnector-service");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -2112,10 +2113,8 @@ async function handleStartOdEConnector(commandId) {
   const { execSync } = require("child_process");
 
   // R-61: newer OD installs name the service "OpenDentalEConnector", older ones
-  // "OpenDenteConnector". Resolve the real name instead of a single hardcode.
-  const CANDIDATES = ["OpenDentalEConnector", "OpenDenteConnector"];
-
-  // Discover installed services (same read-only probe as SCAN_OD_MYSQL_HOSTS).
+  // "OpenDenteConnector". Discover installed services (same read-only probe as
+  // SCAN_OD_MYSQL_HOSTS), then resolve the ordered, validated try-list.
   const discovered = [];
   try {
     const raw = execSync(
@@ -2128,22 +2127,7 @@ async function handleStartOdEConnector(commandId) {
     }
   } catch {}
 
-  // Ordered try-list: hardcoded candidates first, then any discovered service.
-  // eConnector-ONLY — OpenDentalService and any non-eConnector name are excluded
-  // so they can never be sc-started. Every name is allowlist-validated before it
-  // reaches a shell:true command.
-  const seen = new Set();
-  const tryList = [];
-  for (const rawName of [...CANDIDATES, ...discovered]) {
-    const v = validateServiceName(rawName);
-    if (v.invalid) continue;
-    const name = v.service;
-    if (!/econnector/i.test(name)) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    tryList.push(name);
-  }
+  const tryList = resolveEConnectorTryList(discovered);
 
   let service = tryList[0];
   let started = false;
