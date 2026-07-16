@@ -2045,40 +2045,84 @@ async function handleReadOdPatientPlan(commandId, payload) {
 
 async function handleStartOdEConnector(commandId) {
   const { execSync } = require("child_process");
-  const SERVICE = "OpenDenteConnector";
 
+  // R-61: newer OD installs name the service "OpenDentalEConnector", older ones
+  // "OpenDenteConnector". Resolve the real name instead of a single hardcode.
+  const CANDIDATES = ["OpenDentalEConnector", "OpenDenteConnector"];
+
+  // Discover installed services (same read-only probe as SCAN_OD_MYSQL_HOSTS).
+  const discovered = [];
+  try {
+    const raw = execSync(
+      'sc query type= all state= all 2>nul | findstr /i "opendental econnector dental"',
+      { encoding: "utf8", timeout: 5000, shell: true },
+    );
+    for (const line of raw.split("\n")) {
+      const m = line.match(/SERVICE_NAME:\s+(\S+)/i);
+      if (m && m[1]) discovered.push(m[1].trim());
+    }
+  } catch {}
+
+  // Ordered try-list: hardcoded candidates first, then any discovered service.
+  // eConnector-ONLY — OpenDentalService and any non-eConnector name are excluded
+  // so they can never be sc-started. Every name is allowlist-validated before it
+  // reaches a shell:true command.
+  const seen = new Set();
+  const tryList = [];
+  for (const rawName of [...CANDIDATES, ...discovered]) {
+    const v = validateServiceName(rawName);
+    if (v.invalid) continue;
+    const name = v.service;
+    if (!/econnector/i.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tryList.push(name);
+  }
+
+  let service = tryList[0];
   let started = false;
   let auto_start_set = false;
   let final_state = null;
   let error_category = null;
 
-  try {
-    execSync(`sc start ${SERVICE} 2>nul`, {
-      encoding: "utf8",
-      timeout: 15000,
-      shell: true,
-    });
-    started = true;
-  } catch (e) {
-    const msg = (
-      (e.stderr || "") +
-      (e.stdout || "") +
-      (e.message || "")
-    ).toLowerCase();
-    if (msg.includes("access is denied") || msg.includes("error 5")) {
-      error_category = "INSUFFICIENT_PRIVILEGES";
-    } else if (msg.includes("already running") || msg.includes("error 1056")) {
+  for (const name of tryList) {
+    service = name;
+    started = false;
+    error_category = null;
+    try {
+      execSync(`sc start "${name}" 2>nul`, {
+        encoding: "utf8",
+        timeout: 15000,
+        shell: true,
+      });
       started = true;
-    } else if (msg.includes("does not exist") || msg.includes("error 1060")) {
-      error_category = "SERVICE_NOT_FOUND";
-    } else {
-      error_category = "START_FAILED";
+    } catch (e) {
+      const msg = (
+        (e.stderr || "") +
+        (e.stdout || "") +
+        (e.message || "")
+      ).toLowerCase();
+      if (msg.includes("access is denied") || msg.includes("error 5")) {
+        error_category = "INSUFFICIENT_PRIVILEGES";
+      } else if (
+        msg.includes("already running") ||
+        msg.includes("error 1056")
+      ) {
+        started = true;
+      } else if (msg.includes("does not exist") || msg.includes("error 1060")) {
+        error_category = "SERVICE_NOT_FOUND";
+        continue; // wrong name for this install — try the next candidate
+      } else {
+        error_category = "START_FAILED";
+      }
     }
+    break; // service resolved: started, already-running, denied, or start-failed
   }
 
   if (started) {
     try {
-      execSync(`sc config ${SERVICE} start= auto 2>nul`, {
+      execSync(`sc config "${service}" start= auto 2>nul`, {
         encoding: "utf8",
         timeout: 5000,
         shell: true,
@@ -2088,7 +2132,7 @@ async function handleStartOdEConnector(commandId) {
   }
 
   try {
-    const q = execSync(`sc query ${SERVICE} 2>nul`, {
+    const q = execSync(`sc query "${service}" 2>nul`, {
       encoding: "utf8",
       timeout: 5000,
       shell: true,
@@ -2106,7 +2150,7 @@ async function handleStartOdEConnector(commandId) {
     "START_OD_ECONNECTOR",
     success ? "COMPLETED" : "FAILED",
     {
-      service: SERVICE,
+      service,
       started,
       auto_start_set,
       final_state,
