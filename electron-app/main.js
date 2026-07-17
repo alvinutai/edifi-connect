@@ -2043,6 +2043,16 @@ async function handleReadOdPatientPlan(commandId, payload) {
 // Sets service to auto-start so it survives reboots.
 // Fails gracefully if admin rights are insufficient.
 
+function validateServiceName(rawService) {
+  const SERVICE =
+    (typeof rawService === "string" ? rawService.trim() : "") ||
+    "OpenDenteConnector";
+  const SAFE_SERVICE_NAME = /^[A-Za-z0-9 _.\\-]{1,80}$/;
+  return SAFE_SERVICE_NAME.test(SERVICE)
+    ? { service: SERVICE }
+    : { invalid: true };
+}
+
 async function handleStartOdEConnector(commandId) {
   const { execSync } = require("child_process");
 
