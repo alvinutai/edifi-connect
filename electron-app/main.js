@@ -943,10 +943,10 @@ async function handleSetMysqlConfig(commandId, payload) {
   const mode = password;
 
   // USE_OD_CONFIG: self-provision from Open Dental's own FreeDentalConfig on this
-  // machine. Connection identity (host/db/user) and the password come together
-  // from OD's own config so they always match; only the network location (host/
-  // port) may be overridden by the payload. The stored MySqlPassHash is
-  // de-obfuscated via the OD-installed CDT.dll and never leaves the machine.
+  // machine. All connection fields (host/port/db/user) and the password come
+  // together from OD's own config so they always match; payload connection fields
+  // are ignored for this mode. The stored MySqlPassHash is de-obfuscated via the
+  // OD-installed CDT.dll and never leaves the machine.
   if (mode === "USE_OD_CONFIG") {
     const od = readOdFreeDentalConfig();
     if (!od) {
