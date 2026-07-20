@@ -194,38 +194,73 @@ async function readOdConfig() {
 
 // ─── Connection Pool ──────────────────────────────────────────────────────────
 
+// Records the outcome of each connection strategy from the last getPool() attempt.
+// Contains only strategy labels + MySQL error codes — never passwords or PHI.
+let lastConnectDiag = [];
+function getConnectDiagnostics() {
+  return lastConnectDiag;
+}
+
+// Ordered connection strategies. Open Dental on Windows authenticates as
+// user@localhost through a path a plain TCP client may not match (localhost-only
+// grant, or skip_name_resolve). We try IPv4 TCP first (avoids the localhost->::1
+// resolution that never matches an IPv4-only server), then the raw host if it
+// differs, then the default Windows named pipe (which MySQL treats as localhost).
+function buildConnectStrategies(cfg) {
+  const base = {
+    database: cfg.database,
+    user: cfg.user,
+    password: cfg.password,
+    connectionLimit: 3,
+    connectTimeout: 6000,
+    waitForConnections: true,
+    queueLimit: 10,
+  };
+  // "localhost" -> 127.0.0.1 so we never hit the Windows localhost->::1 resolution
+  // that an IPv4-only MySQL never accepts. A TCP connection from 127.0.0.1 still
+  // matches a user@localhost grant when skip_name_resolve is off; when it is on,
+  // only the named pipe matches localhost, so that is the fallback.
+  const ipv4 = cfg.host === "localhost" ? "127.0.0.1" : cfg.host;
+  return [
+    { label: `tcp:${ipv4}`, opts: { ...base, host: ipv4, port: cfg.port } },
+    { label: "pipe", opts: { ...base, socketPath: "\\\\.\\pipe\\MySQL" } },
+  ];
+}
+
 async function getPool() {
   if (pool) return pool;
   const cfg = await readOdConfig();
   if (!cfg) return null;
 
-  try {
-    const mysql = require("mysql2/promise");
-    const p = mysql.createPool({
-      host: cfg.host,
-      port: cfg.port,
-      database: cfg.database,
-      user: cfg.user,
-      password: cfg.password,
-      connectionLimit: 3,
-      connectTimeout: 6000,
-      waitForConnections: true,
-      queueLimit: 10,
-    });
-    // Connectivity test
-    const conn = await p.getConnection();
-    await conn.query("SELECT 1");
-    conn.release();
-    pool = p;
-    logger(
-      `Connected to ${cfg.host}:${cfg.port}/${cfg.database} — benefit queries ready`,
-    );
-    return pool;
-  } catch (e) {
-    logger(`MySQL connection failed (${cfg.host}:${cfg.port}): ${e.message}`);
-    pool = null;
-    return null;
+  const mysql = require("mysql2/promise");
+  lastConnectDiag = [];
+  for (const s of buildConnectStrategies(cfg)) {
+    let p;
+    try {
+      p = mysql.createPool(s.opts);
+      const conn = await p.getConnection();
+      await conn.query("SELECT 1");
+      conn.release();
+      pool = p;
+      lastConnectDiag.push({ strategy: s.label, ok: true });
+      logger(
+        `Connected via ${s.label} — ${cfg.database} — benefit queries ready`,
+      );
+      return pool;
+    } catch (e) {
+      lastConnectDiag.push({
+        strategy: s.label,
+        ok: false,
+        code: e.code || "ERR",
+      });
+      logger(`MySQL ${s.label} failed: ${e.code || e.message}`);
+      try {
+        if (p) await p.end();
+      } catch {}
+    }
   }
+  pool = null;
+  return null;
 }
 
 // ─── Availability Check ───────────────────────────────────────────────────────
@@ -790,4 +825,6 @@ module.exports = {
   setLogger,
   setManualMysqlConfig,
   clearManualMysqlConfig,
+  buildConnectStrategies,
+  getConnectDiagnostics,
 };

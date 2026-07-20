@@ -26,6 +26,7 @@ const {
   setLogger: setMysqlLogger,
   setManualMysqlConfig,
   clearManualMysqlConfig,
+  getConnectDiagnostics,
   readOdConfig,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
@@ -1046,6 +1047,8 @@ async function handleSetMysqlConfig(commandId, payload) {
     config.od_mysql = mysqlCfg;
     saveConfig();
     const ok = await isMysqlAvailable().catch(() => false);
+    // Per-strategy connect outcomes (labels + MySQL error codes only, no secrets).
+    const connectDiag = ok ? undefined : getConnectDiagnostics();
     if (!ok) {
       config.od_mysql = priorMysql;
       if (priorMysql) setManualMysqlConfig(priorMysql);
@@ -1063,6 +1066,7 @@ async function handleSetMysqlConfig(commandId, payload) {
         mysql_user: user,
         mysql_reachable: ok,
         config_persisted: ok,
+        ...(connectDiag ? { connect_diagnostics: connectDiag } : {}),
       },
       ok ? undefined : "MYSQL_UNREACHABLE",
       ok ? undefined : "MySQL connection failed; prior config left unchanged",
