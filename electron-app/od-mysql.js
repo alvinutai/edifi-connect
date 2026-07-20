@@ -94,7 +94,21 @@ function setManualMysqlConfig(cfg) {
   pool = null;
   covCatCache = null;
   codeGroupAvailable = null;
-  logger(`Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`);
+  logger(
+    `Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`,
+  );
+}
+
+// Clears any manual override and cached connection state so config falls back to
+// the normal file scan. Used to roll back a failed SET_MYSQL_CONFIG attempt when
+// there was no prior override to restore.
+function clearManualMysqlConfig() {
+  manualConfigOverride = null;
+  configCache = null;
+  available = null;
+  pool = null;
+  covCatCache = null;
+  codeGroupAvailable = null;
 }
 
 // Reset availability every 5 min so transient MySQL failures don't stick permanently
@@ -775,4 +789,5 @@ module.exports = {
   buildCovCatMap,
   setLogger,
   setManualMysqlConfig,
+  clearManualMysqlConfig,
 };

@@ -25,6 +25,7 @@ const {
   writeOdBenefits,
   setLogger: setMysqlLogger,
   setManualMysqlConfig,
+  clearManualMysqlConfig,
   readOdConfig,
 } = require("./od-mysql");
 const { autoUpdater } = require("electron-updater");
@@ -1048,6 +1049,7 @@ async function handleSetMysqlConfig(commandId, payload) {
     if (!ok) {
       config.od_mysql = priorMysql;
       if (priorMysql) setManualMysqlConfig(priorMysql);
+      else clearManualMysqlConfig();
       saveConfig();
     }
     sendCommandResult(
