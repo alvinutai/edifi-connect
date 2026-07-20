@@ -218,13 +218,25 @@ function buildConnectStrategies(cfg) {
   };
   // "localhost" -> 127.0.0.1 so we never hit the Windows localhost->::1 resolution
   // that an IPv4-only MySQL never accepts. A TCP connection from 127.0.0.1 still
-  // matches a user@localhost grant when skip_name_resolve is off; when it is on,
-  // only the named pipe matches localhost, so that is the fallback.
+  // matches a user@localhost grant when skip_name_resolve is off.
   const ipv4 = cfg.host === "localhost" ? "127.0.0.1" : cfg.host;
-  return [
+  const strategies = [
     { label: `tcp:${ipv4}`, opts: { ...base, host: ipv4, port: cfg.port } },
-    { label: "pipe", opts: { ...base, socketPath: "\\\\.\\pipe\\MySQL" } },
   ];
+  // The named pipe is a LOCAL-only transport (MySQL treats it as localhost, which
+  // matches a localhost-only grant when skip_name_resolve is on). Only add it for a
+  // local host — never for a remote host, or a remote TCP failure could silently
+  // fall through to an unrelated local MySQL instance.
+  const isLocal = ["localhost", "127.0.0.1", "::1", "."].includes(
+    String(cfg.host || "").toLowerCase(),
+  );
+  if (isLocal) {
+    strategies.push({
+      label: "pipe",
+      opts: { ...base, socketPath: "\\\\.\\pipe\\MySQL" },
+    });
+  }
+  return strategies;
 }
 
 async function getPool() {

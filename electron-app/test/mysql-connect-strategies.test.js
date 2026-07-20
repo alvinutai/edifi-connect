@@ -51,13 +51,25 @@ test("localhost yields exactly two strategies (ipv4 + pipe), no duplicate host",
   );
 });
 
-test("a non-localhost host is tried verbatim before the pipe", () => {
+test("a remote host is TCP-only — no local named-pipe fallback", () => {
   const s = buildConnectStrategies(cfg({ host: "192.168.68.56" }));
   assert.deepStrictEqual(
     s.map((x) => x.label),
-    ["tcp:192.168.68.56", "pipe"],
+    ["tcp:192.168.68.56"],
   );
   assert.strictEqual(s[0].opts.host, "192.168.68.56");
+  assert.ok(
+    !s.some((x) => x.opts.socketPath),
+    "remote host must not use a pipe",
+  );
+});
+
+test("127.0.0.1 host still gets the local pipe fallback", () => {
+  const s = buildConnectStrategies(cfg({ host: "127.0.0.1" }));
+  assert.deepStrictEqual(
+    s.map((x) => x.label),
+    ["tcp:127.0.0.1", "pipe"],
+  );
 });
 
 test("every strategy carries the credentials and db", () => {
