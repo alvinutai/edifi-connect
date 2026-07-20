@@ -46,6 +46,8 @@ const {
   sanitizePatientPlanRestRow,
   sanitizePatientPlanMysqlRow,
 } = require("./lib/od-plan-nums");
+const { parseOdConfigXml } = require("./lib/od-config-parse");
+const { decryptOdPassHash } = require("./lib/od-password");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -901,13 +903,88 @@ async function handleSyncOdNow(commandId, payload) {
   }
 }
 
+// Reads Open Dental's FreeDentalConfig.xml on this machine and returns the DB
+// connection fields (host/port/db/user + stored password/hash). Returns null if
+// no config file is present. Never returns file contents beyond these fields.
+function readOdFreeDentalConfig() {
+  const fs = require("fs");
+  const OD_CONFIG_PATHS = [
+    "C:\\OpenDental\\FreeDentalConfig.xml",
+    "C:\\Program Files (x86)\\Open Dental\\FreeDentalConfig.xml",
+    "C:\\Program Files\\Open Dental\\FreeDentalConfig.xml",
+    (process.env.LOCALAPPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
+    (process.env.APPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
+  ];
+  for (const cfgPath of OD_CONFIG_PATHS) {
+    try {
+      if (!fs.existsSync(cfgPath)) continue;
+      const xml = fs.readFileSync(cfgPath, "utf8");
+      return { configPath: cfgPath, ...parseOdConfigXml(xml) };
+    } catch {}
+  }
+  return null;
+}
+
 // ── SET_MYSQL_CONFIG ──────────────────────────────────────────────────────────
 // Stores OD MySQL credentials locally in config.json and applies them immediately.
 // Password is NEVER logged. Only success/failure is reported in the result.
 
 async function handleSetMysqlConfig(commandId, payload) {
-  const { host, port, database, user } = payload ?? {};
+  let { host, port, database, user } = payload ?? {};
   let password = payload?.password;
+
+  // USE_OD_CONFIG: self-provision from Open Dental's own FreeDentalConfig on this
+  // machine. Reads host/port/db/user from OD's config (any payload value overrides)
+  // and de-obfuscates the stored MySqlPassHash via the OD-installed CDT.dll. The
+  // decrypted password never leaves the machine. Removes the manual DB-setup step.
+  if (password === "USE_OD_CONFIG") {
+    const od = readOdFreeDentalConfig();
+    if (!od) {
+      sendCommandResult(
+        commandId,
+        "SET_MYSQL_CONFIG",
+        "FAILED",
+        null,
+        "OD_CONFIG_NOT_FOUND",
+        "FreeDentalConfig.xml not found on this machine",
+      );
+      return;
+    }
+    host = host || od.host || "127.0.0.1";
+    port = port || od.port || "3306";
+    database = database || od.database;
+    user = user || od.user;
+    try {
+      if (od.plaintext) {
+        password = od.plaintext;
+      } else if (od.passHash) {
+        password = decryptOdPassHash(
+          od.passHash,
+          od.configPath ? require("path").dirname(od.configPath) : null,
+        );
+      } else {
+        sendCommandResult(
+          commandId,
+          "SET_MYSQL_CONFIG",
+          "FAILED",
+          null,
+          "OD_NO_PASSWORD",
+          "Open Dental config has no stored MySQL password",
+        );
+        return;
+      }
+    } catch (e) {
+      sendCommandResult(
+        commandId,
+        "SET_MYSQL_CONFIG",
+        "FAILED",
+        null,
+        "OD_DECRYPT_FAILED",
+        ("Could not read OD MySQL password: " + e.message).slice(0, 200),
+      );
+      return;
+    }
+  }
 
   // USE_PERSISTED: reuse password already saved in config.json — avoids re-entry for host-only changes
   if (!password || password === "USE_PERSISTED") {
