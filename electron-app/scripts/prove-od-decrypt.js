@@ -11,17 +11,19 @@ if (!hash) {
   console.error("set OD_HASH (and optionally OD_DIR)");
   process.exit(2);
 }
-try {
-  const pw = decryptOdPassHash(hash, odDir);
-  const classes = [];
-  if (/[a-z]/.test(pw)) classes.push("lower");
-  if (/[A-Z]/.test(pw)) classes.push("upper");
-  if (/[0-9]/.test(pw)) classes.push("digit");
-  if (/[^a-zA-Z0-9]/.test(pw)) classes.push("symbol");
-  console.log(
-    `DECRYPT OK  length=${pw.length}  charclasses=${classes.join("+")}`,
-  );
-} catch (e) {
-  console.error("DECRYPT FAILED:", e.message);
-  process.exit(1);
-}
+(async () => {
+  try {
+    const pw = await decryptOdPassHash(hash, odDir);
+    const classes = [];
+    if (/[a-z]/.test(pw)) classes.push("lower");
+    if (/[A-Z]/.test(pw)) classes.push("upper");
+    if (/[0-9]/.test(pw)) classes.push("digit");
+    if (/[^a-zA-Z0-9]/.test(pw)) classes.push("symbol");
+    console.log(
+      `DECRYPT OK  length=${pw.length}  charclasses=${classes.join("+")}`,
+    );
+  } catch (e) {
+    console.error("DECRYPT FAILED:", e.message);
+    process.exit(1);
+  }
+})();

@@ -909,17 +909,22 @@ async function handleSyncOdNow(commandId, payload) {
 function readOdFreeDentalConfig() {
   const fs = require("fs");
   const OD_CONFIG_PATHS = [
-    "C:\\OpenDental\\FreeDentalConfig.xml",
     "C:\\Program Files (x86)\\Open Dental\\FreeDentalConfig.xml",
     "C:\\Program Files\\Open Dental\\FreeDentalConfig.xml",
+    "C:\\Open Dental\\FreeDentalConfig.xml",
+    "C:\\OpenDental\\FreeDentalConfig.xml",
     (process.env.LOCALAPPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
     (process.env.APPDATA || "") + "\\OpenDental\\FreeDentalConfig.xml",
   ];
   for (const cfgPath of OD_CONFIG_PATHS) {
     try {
       if (!fs.existsSync(cfgPath)) continue;
-      const xml = fs.readFileSync(cfgPath, "utf8");
-      return { configPath: cfgPath, ...parseOdConfigXml(xml) };
+      const parsed = parseOdConfigXml(fs.readFileSync(cfgPath, "utf8"));
+      // Skip an incomplete/stale config and keep looking — a file with no usable
+      // connection or password is not the active install.
+      if (!parsed.host || !parsed.database || !parsed.user) continue;
+      if (!parsed.plaintext && !parsed.passHash) continue;
+      return { configPath: cfgPath, ...parsed };
     } catch {}
   }
   return null;
@@ -932,12 +937,16 @@ function readOdFreeDentalConfig() {
 async function handleSetMysqlConfig(commandId, payload) {
   let { host, port, database, user } = payload ?? {};
   let password = payload?.password;
+  // Track the requested mode separately from the resolved value so a decrypted
+  // password that happens to equal a sentinel string is never re-interpreted.
+  const mode = password;
 
   // USE_OD_CONFIG: self-provision from Open Dental's own FreeDentalConfig on this
-  // machine. Reads host/port/db/user from OD's config (any payload value overrides)
-  // and de-obfuscates the stored MySqlPassHash via the OD-installed CDT.dll. The
-  // decrypted password never leaves the machine. Removes the manual DB-setup step.
-  if (password === "USE_OD_CONFIG") {
+  // machine. Connection identity (host/db/user) and the password come together
+  // from OD's own config so they always match; only the network location (host/
+  // port) may be overridden by the payload. The stored MySqlPassHash is
+  // de-obfuscated via the OD-installed CDT.dll and never leaves the machine.
+  if (mode === "USE_OD_CONFIG") {
     const od = readOdFreeDentalConfig();
     if (!od) {
       sendCommandResult(
@@ -952,13 +961,13 @@ async function handleSetMysqlConfig(commandId, payload) {
     }
     host = host || od.host || "127.0.0.1";
     port = port || od.port || "3306";
-    database = database || od.database;
-    user = user || od.user;
+    database = od.database; // identity comes from OD config, not the payload
+    user = od.user;
     try {
       if (od.plaintext) {
         password = od.plaintext;
       } else if (od.passHash) {
-        password = decryptOdPassHash(
+        password = await decryptOdPassHash(
           od.passHash,
           od.configPath ? require("path").dirname(od.configPath) : null,
         );
@@ -974,20 +983,24 @@ async function handleSetMysqlConfig(commandId, payload) {
         return;
       }
     } catch (e) {
+      // Fixed message — never forward raw PowerShell/DLL output (may echo secrets).
+      log(
+        `SET_MYSQL_CONFIG USE_OD_CONFIG decrypt failed: ${e.code || "error"}`,
+      );
       sendCommandResult(
         commandId,
         "SET_MYSQL_CONFIG",
         "FAILED",
         null,
         "OD_DECRYPT_FAILED",
-        ("Could not read OD MySQL password: " + e.message).slice(0, 200),
+        "Could not read the Open Dental MySQL password from this machine",
       );
       return;
     }
   }
 
   // USE_PERSISTED: reuse password already saved in config.json — avoids re-entry for host-only changes
-  if (!password || password === "USE_PERSISTED") {
+  if (mode !== "USE_OD_CONFIG" && (!password || password === "USE_PERSISTED")) {
     if (config.od_mysql && config.od_mysql.password) {
       password = config.od_mysql.password;
     } else {
@@ -1015,9 +1028,10 @@ async function handleSetMysqlConfig(commandId, payload) {
     return;
   }
   try {
+    const parsedPort = parseInt(port ?? "3306", 10);
     const mysqlCfg = {
       host,
-      port: parseInt(port ?? "3306", 10),
+      port: Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 3306,
       database,
       user,
       password,

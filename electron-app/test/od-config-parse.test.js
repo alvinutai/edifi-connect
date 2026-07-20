@@ -87,5 +87,30 @@ test("missing fields are null (host) without throwing", () => {
   assert.strictEqual(f.database, null);
 });
 
+test("decodes XML entities in a plaintext password", () => {
+  const xml =
+    "<DatabaseConnection><Password>a&amp;b&lt;c&gt;&quot;</Password></DatabaseConnection>";
+  assert.strictEqual(parseOdConfigXml(xml).plaintext, 'a&b<c>"');
+});
+
+test("preserves whitespace inside a plaintext password", () => {
+  const xml =
+    "<DatabaseConnection><Password> pw </Password></DatabaseConnection>";
+  assert.strictEqual(parseOdConfigXml(xml).plaintext, " pw ");
+});
+
+test("ignores commented-out tags", () => {
+  const xml =
+    "<DatabaseConnection><!-- <Database>stale</Database> --><Database>live</Database></DatabaseConnection>";
+  assert.strictEqual(parseOdConfigXml(xml).database, "live");
+});
+
+test("scopes to DatabaseConnection, ignoring other sections", () => {
+  const xml =
+    "<ServerConnection><User>webuser</User></ServerConnection>" +
+    "<DatabaseConnection><User>root</User></DatabaseConnection>";
+  assert.strictEqual(parseOdConfigXml(xml).user, "root");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -8,36 +8,31 @@
  */
 
 const assert = require("assert");
+const path = require("path");
 const { decryptOdPassHash } = require("../lib/od-password");
 
 let passed = 0;
 let failed = 0;
+const tests = [];
 function test(name, fn) {
-  try {
-    fn();
-    console.log(`  ✓ ${name}`);
-    passed++;
-  } catch (e) {
-    console.error(`  ✗ ${name}: ${e.message}`);
-    failed++;
-  }
+  tests.push({ name, fn });
 }
 
 const fakeFsWithDll = { existsSync: () => true };
+// execFile fake returning { stdout } (matches util.promisify(execFile) shape)
+const fakeExec = (stdout, capture) => async (file, args, opts) => {
+  if (capture) capture({ file, args, opts });
+  return { stdout };
+};
 
-test("passes hash and DLL path via env, never on the command line", () => {
+test("passes hash and DLL path via env, never on the command line", async () => {
   let captured;
-  const execFileSync = (file, args, opts) => {
-    captured = { file, args, opts };
-    return "s3cret\r\n";
-  };
-  const pw = decryptOdPassHash("odv2e$ABC==", "C:\\OD", {
+  const pw = await decryptOdPassHash("odv2e$ABC==", "C:\\OD", {
     fs: fakeFsWithDll,
-    execFileSync,
+    execFile: fakeExec("s3cret\r\n", (c) => (captured = c)),
   });
   assert.strictEqual(pw, "s3cret");
-  assert.strictEqual(captured.file, "powershell.exe");
-  // the obfuscated hash must NOT appear in any command-line argument
+  assert.ok(/powershell\.exe$/i.test(captured.file), "not absolute powershell");
   assert.ok(
     !captured.args.some((a) => a.includes("odv2e$ABC==")),
     "hash leaked into argv",
@@ -46,35 +41,63 @@ test("passes hash and DLL path via env, never on the command line", () => {
   assert.ok(captured.opts.env.OD_CDT_DLL.endsWith("CDT.dll"));
 });
 
-test("throws when CDT.dll is not found", () => {
-  assert.throws(
-    () =>
-      decryptOdPassHash("odv2e$X", null, {
-        fs: { existsSync: () => false },
-        execFileSync: () => "x",
-      }),
+test("loads DLL from a trusted install dir, not a supplied AppData dir", async () => {
+  let captured;
+  const appData = "C:\\Users\\x\\AppData\\Roaming\\OpenDental";
+  await decryptOdPassHash("odv2e$X", appData, {
+    fs: fakeFsWithDll,
+    execFile: fakeExec("pw", (c) => (captured = c)),
+  });
+  // must resolve to a trusted Program Files/OD dir, never the AppData dir
+  assert.ok(
+    !captured.opts.env.OD_CDT_DLL.includes("AppData"),
+    "loaded DLL from AppData",
+  );
+  assert.strictEqual(
+    captured.opts.env.OD_CDT_DLL,
+    path.join("C:\\Program Files (x86)\\Open Dental", "CDT.dll"),
+  );
+});
+
+test("throws when CDT.dll is not found", async () => {
+  await assert.rejects(
+    decryptOdPassHash("odv2e$X", null, {
+      fs: { existsSync: () => false },
+      execFile: fakeExec("x"),
+    }),
     /CDT\.dll not found/,
   );
 });
 
-test("throws when TryDecrypt returns empty", () => {
-  assert.throws(
-    () =>
-      decryptOdPassHash("odv2e$X", "C:\\OD", {
-        fs: fakeFsWithDll,
-        execFileSync: () => "",
-      }),
+test("throws when TryDecrypt returns empty", async () => {
+  await assert.rejects(
+    decryptOdPassHash("odv2e$X", "C:\\Open Dental", {
+      fs: fakeFsWithDll,
+      execFile: fakeExec(""),
+    }),
     /returned empty/,
   );
 });
 
-test("trims trailing newline from PowerShell output", () => {
-  const pw = decryptOdPassHash("odv2e$X", "C:\\OD", {
+test("trims trailing newline from PowerShell output", async () => {
+  const pw = await decryptOdPassHash("odv2e$X", "C:\\Open Dental", {
     fs: fakeFsWithDll,
-    execFileSync: () => "pw-no-newline",
+    execFile: fakeExec("pw-no-newline"),
   });
   assert.strictEqual(pw, "pw-no-newline");
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+(async () => {
+  for (const { name, fn } of tests) {
+    try {
+      await fn();
+      console.log(`  ✓ ${name}`);
+      passed++;
+    } catch (e) {
+      console.error(`  ✗ ${name}: ${e.message}`);
+      failed++;
+    }
+  }
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})();
