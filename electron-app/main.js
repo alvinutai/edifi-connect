@@ -920,10 +920,10 @@ function readOdFreeDentalConfig() {
     try {
       if (!fs.existsSync(cfgPath)) continue;
       const parsed = parseOdConfigXml(fs.readFileSync(cfgPath, "utf8"));
-      // Skip an incomplete/stale config and keep looking — a file with no usable
-      // connection or password is not the active install.
+      // Skip an incomplete/stale config (no usable connection identity) and keep
+      // looking. Password presence is classified by the caller so a config that
+      // exists but has no stored password is reported distinctly from "not found".
       if (!parsed.host || !parsed.database || !parsed.user) continue;
-      if (!parsed.plaintext && !parsed.passHash) continue;
       return { configPath: cfgPath, ...parsed };
     } catch {}
   }
@@ -959,9 +959,11 @@ async function handleSetMysqlConfig(commandId, payload) {
       );
       return;
     }
-    host = host || od.host || "127.0.0.1";
-    port = port || od.port || "3306";
-    database = od.database; // identity comes from OD config, not the payload
+    // All connection fields come from OD's own config so the server, user, and
+    // password always belong together; payload overrides are ignored for this mode.
+    host = od.host;
+    port = od.port;
+    database = od.database;
     user = od.user;
     try {
       if (od.plaintext) {
@@ -1028,18 +1030,26 @@ async function handleSetMysqlConfig(commandId, payload) {
     return;
   }
   try {
-    const parsedPort = parseInt(port ?? "3306", 10);
+    const portStr = String(port ?? "3306");
+    const portNum = /^\d+$/.test(portStr) ? parseInt(portStr, 10) : 3306;
     const mysqlCfg = {
       host,
-      port: Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : 3306,
+      port: portNum >= 1 && portNum <= 65535 ? portNum : 3306,
       database,
       user,
       password,
     };
+    // Snapshot so a failed attempt can't clobber a previously working config.
+    const priorMysql = config.od_mysql;
     setManualMysqlConfig(mysqlCfg);
     config.od_mysql = mysqlCfg;
     saveConfig();
     const ok = await isMysqlAvailable().catch(() => false);
+    if (!ok) {
+      config.od_mysql = priorMysql;
+      if (priorMysql) setManualMysqlConfig(priorMysql);
+      saveConfig();
+    }
     sendCommandResult(
       commandId,
       "SET_MYSQL_CONFIG",
@@ -1050,10 +1060,10 @@ async function handleSetMysqlConfig(commandId, payload) {
         mysql_database: database,
         mysql_user: user,
         mysql_reachable: ok,
-        config_persisted: true,
+        config_persisted: ok,
       },
       ok ? undefined : "MYSQL_UNREACHABLE",
-      ok ? undefined : "Config saved but MySQL connection failed",
+      ok ? undefined : "MySQL connection failed; prior config left unchanged",
     );
   } catch (e) {
     sendCommandResult(

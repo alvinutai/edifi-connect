@@ -41,21 +41,32 @@ test("passes hash and DLL path via env, never on the command line", async () => 
   assert.ok(captured.opts.env.OD_CDT_DLL.endsWith("CDT.dll"));
 });
 
-test("loads DLL from a trusted install dir, not a supplied AppData dir", async () => {
+test("ignores a non-allowlisted supplied dir, loads only from the allowlist", async () => {
   let captured;
   const appData = "C:\\Users\\x\\AppData\\Roaming\\OpenDental";
   await decryptOdPassHash("odv2e$X", appData, {
     fs: fakeFsWithDll,
     execFile: fakeExec("pw", (c) => (captured = c)),
   });
-  // must resolve to a trusted Program Files/OD dir, never the AppData dir
   assert.ok(
     !captured.opts.env.OD_CDT_DLL.includes("AppData"),
-    "loaded DLL from AppData",
+    "loaded DLL from a non-allowlisted dir",
   );
   assert.strictEqual(
     captured.opts.env.OD_CDT_DLL,
     path.join("C:\\Program Files (x86)\\Open Dental", "CDT.dll"),
+  );
+});
+
+test("prioritizes the config's own dir when it is on the allowlist", async () => {
+  let captured;
+  await decryptOdPassHash("odv2e$X", "C:\\Open Dental", {
+    fs: fakeFsWithDll,
+    execFile: fakeExec("pw", (c) => (captured = c)),
+  });
+  assert.strictEqual(
+    captured.opts.env.OD_CDT_DLL,
+    path.join("C:\\Open Dental", "CDT.dll"),
   );
 });
 

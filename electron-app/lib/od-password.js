@@ -8,9 +8,9 @@
  *   - hash and DLL path are passed to PowerShell via environment variables, never
  *     interpolated into the command string → no shell-injection surface even
  *     though the hash is attacker-influenceable in principle.
- *   - the CDT.dll is loaded only from trusted, non-user-writable Open Dental
- *     install directories (Program Files / C:\[Open]Dental); a directory under
- *     AppData is rejected so a planted DLL can't be loaded.
+ *   - the CDT.dll is loaded ONLY from the trusted allowlist of Open Dental
+ *     install directories (Program Files / C:\[Open]Dental), never from a
+ *     caller-supplied path, so a planted DLL in a user-writable dir can't load.
  *   - PowerShell is invoked by absolute System32 path to defeat PATH hijacking.
  *   - async (execFile) so the Electron main process / bridge heartbeat never blocks.
  *
@@ -31,10 +31,6 @@ const TRUSTED_OD_DIRS = [
   "C:\\OpenDental",
 ];
 
-function isUnderAppData(dir) {
-  return /\\AppData\\/i.test(dir || "");
-}
-
 async function decryptOdPassHash(passHash, odDir, deps) {
   const fs = (deps && deps.fs) || require("fs");
   const pathMod = require("path");
@@ -42,11 +38,12 @@ async function decryptOdPassHash(passHash, odDir, deps) {
     (deps && deps.execFile) ||
     require("util").promisify(require("child_process").execFile);
 
-  // Trusted install dirs first; the discovered odDir last, and only if it is not
-  // user-writable AppData (which would let a non-admin plant a malicious CDT.dll).
-  const dirs = [...TRUSTED_OD_DIRS];
-  if (odDir && !isUnderAppData(odDir) && !dirs.includes(odDir))
-    dirs.push(odDir);
+  // Only ever load CDT.dll from the trusted allowlist — never from a caller-
+  // supplied path directly. If the config's own directory is on the allowlist,
+  // try it first so the DLL is co-located with the config that produced the hash.
+  const dirs = [];
+  if (odDir && TRUSTED_OD_DIRS.includes(odDir)) dirs.push(odDir);
+  for (const d of TRUSTED_OD_DIRS) if (!dirs.includes(d)) dirs.push(d);
 
   const dll = dirs
     .map((d) => pathMod.join(d, "CDT.dll"))
