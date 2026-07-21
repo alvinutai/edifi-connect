@@ -14,19 +14,17 @@
 
 const NEW_USER = "edifi_ro";
 
-// Parse `sc query type= all state= all` output for a MySQL/MariaDB service name.
-function parseDbServiceName(scQueryOutput) {
-  const names = [];
-  const re = /SERVICE_NAME:\s*(\S+)/gi;
-  let m;
-  while ((m = re.exec(scQueryOutput)) !== null) names.push(m[1]);
-  // Prefer an exact common name, else the first mysql/maria service.
-  const lc = (s) => s.toLowerCase();
-  return (
-    names.find((n) => ["mysql", "mariadb"].includes(lc(n))) ||
-    names.find((n) => /mysql|maria/i.test(n)) ||
-    null
-  );
+// Parse `sc query type= all state= all` into MySQL/MariaDB services with running
+// state. Splitting on SERVICE_NAME keeps each service's STATE with its name.
+function parseDbServices(scQueryOutput) {
+  const blocks = scQueryOutput.split(/(?=SERVICE_NAME:)/i);
+  const out = [];
+  for (const b of blocks) {
+    const nm = b.match(/SERVICE_NAME:\s*(\S+)/i);
+    if (!nm || !/mysql|maria/i.test(nm[1])) continue;
+    out.push({ name: nm[1], running: /STATE\s*:\s*\d+\s+RUNNING/i.test(b) });
+  }
+  return out;
 }
 
 // Parse `sc qc <svc>` output for the mysqld/mariadbd binary path and its
@@ -79,15 +77,34 @@ function removeInitFile(iniText) {
     .join("\r\n");
 }
 
-// SELECT-only grant for both local host forms. One statement per line (init_file
-// requirement). Never grants beyond the OD schema; never alters root.
+// True if the config already has an operator-managed init_file. The provisioner
+// aborts in that case rather than override/strip someone else's startup script.
+function hasInitFile(iniText) {
+  return /^\s*init[_-]file\s*=/im.test(iniText);
+}
+
+// Reject anything that isn't a plain MySQL identifier — the db name is the only
+// caller-influenced value that reaches the init SQL, so it must be strict.
+function assertSafeDbName(db) {
+  if (!/^[A-Za-z0-9_$]{1,64}$/.test(String(db || ""))) {
+    throw new Error("unsafe db identifier");
+  }
+  return db;
+}
+
+// SELECT-only grant for both local host forms. DROP+CREATE (not CREATE IF NOT
+// EXISTS) so a rerun rotates the password and clears any stale privileges on our
+// dedicated account. One statement per line (init_file requirement). Never touches
+// root or any non-edifi_ro account; never grants beyond the OD schema.
 function buildInitSql(db, password, user = NEW_USER) {
-  const q = (s) => String(s).replace(/`/g, "");
+  assertSafeDbName(db);
   return [
-    `CREATE USER IF NOT EXISTS '${user}'@'localhost' IDENTIFIED BY '${password}';`,
-    `CREATE USER IF NOT EXISTS '${user}'@'127.0.0.1' IDENTIFIED BY '${password}';`,
-    `GRANT SELECT ON \`${q(db)}\`.* TO '${user}'@'localhost';`,
-    `GRANT SELECT ON \`${q(db)}\`.* TO '${user}'@'127.0.0.1';`,
+    `DROP USER IF EXISTS '${user}'@'localhost';`,
+    `DROP USER IF EXISTS '${user}'@'127.0.0.1';`,
+    `CREATE USER '${user}'@'localhost' IDENTIFIED BY '${password}';`,
+    `CREATE USER '${user}'@'127.0.0.1' IDENTIFIED BY '${password}';`,
+    `GRANT SELECT ON \`${db}\`.* TO '${user}'@'localhost';`,
+    `GRANT SELECT ON \`${db}\`.* TO '${user}'@'127.0.0.1';`,
     `FLUSH PRIVILEGES;`,
     "",
   ].join("\n");
@@ -105,10 +122,12 @@ function generatePassword(randomBytes) {
 
 module.exports = {
   NEW_USER,
-  parseDbServiceName,
+  parseDbServices,
   parseServicePaths,
   injectInitFile,
   removeInitFile,
+  hasInitFile,
+  assertSafeDbName,
   buildInitSql,
   generatePassword,
 };
