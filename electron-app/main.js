@@ -50,6 +50,7 @@ const {
 } = require("./lib/od-plan-nums");
 const { parseOdConfigXml } = require("./lib/od-config-parse");
 const { decryptOdPassHash } = require("./lib/od-password");
+const odProvision = require("./lib/od-provision");
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ const AGENT_CAPABILITIES = [
   "READ_OD_PLAN_BENEFITS",
   "READ_OD_PLAN_NUMS",
   "READ_OD_PATIENT_PLAN",
+  "PROVISION_OD_READONLY_USER",
 ];
 
 function loadConfig() {
@@ -585,6 +587,9 @@ async function handleCommand(msg) {
       case "TEST_MYSQL_CONNECTION":
         await handleTestMysqlConnection(command_id, payload);
         break;
+      case "PROVISION_OD_READONLY_USER":
+        await handleProvisionOdReadonlyUser(command_id, payload);
+        break;
       case "GET_SESSION_COOKIES":
         await handleGetSessionCookies(command_id, payload);
         break;
@@ -930,6 +935,232 @@ function readOdFreeDentalConfig() {
     } catch {}
   }
   return null;
+}
+
+// ── PROVISION_OD_READONLY_USER ────────────────────────────────────────────────
+// Creates a read-only edifi_ro login on the local MariaDB/MySQL using the engine's
+// init-file mechanism (runs as server admin at startup, no existing password). Used
+// when the OD-stored DB password can't be recovered. Never alters OD's root login.
+// dry_run: discover + elevation check only, changes NOTHING. Real run: backs up
+// my.ini, injects init_file, restarts the DB service, verifies, restores my.ini,
+// and rolls back on any failure. The generated password stays local (never in the
+// result). HIGH-RISK: restarts the DB service — gate + permission enforced backend-side.
+async function handleProvisionOdReadonlyUser(commandId, payload) {
+  const RES = "PROVISION_OD_READONLY_USER";
+  const dryRun = payload?.dry_run === true || payload?.dry_run === "true";
+  const { execSync } = require("child_process");
+  const path = require("path");
+  const net = require("net");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const fail = (code, msg, extra) =>
+    sendCommandResult(
+      commandId,
+      RES,
+      "FAILED",
+      { dry_run: dryRun, ...(extra || {}) },
+      code,
+      msg,
+    );
+  const sh = (cmd, opts = {}) =>
+    execSync(cmd, { encoding: "utf8", timeout: 15000, shell: true, ...opts });
+
+  // 1) discover DB service + my.ini + bin dir
+  let svc, paths;
+  try {
+    svc = odProvision.parseDbServiceName(sh("sc query type= all state= all"));
+    if (!svc)
+      return fail("DB_SERVICE_NOT_FOUND", "No MySQL/MariaDB service found");
+    paths = odProvision.parseServicePaths(sh(`sc qc "${svc}"`));
+    if (!paths.iniPath || !paths.binDir)
+      return fail(
+        "DB_CONFIG_NOT_FOUND",
+        `Could not resolve my.ini/bin dir for ${svc}`,
+        { service: svc },
+      );
+  } catch (e) {
+    return fail("DISCOVERY_ERROR", "Service discovery failed", {
+      detail: (e.code || "err").toString(),
+    });
+  }
+  const od = readOdFreeDentalConfig();
+  const db = (od && od.database) || "opendental";
+
+  // 2) elevation check — service restart requires admin. `net session` only succeeds elevated.
+  let elevated = false;
+  try {
+    execSync("net session", { stdio: "ignore", timeout: 8000, shell: true });
+    elevated = true;
+  } catch {
+    elevated = false;
+  }
+  const readiness = {
+    service: svc,
+    ini_path: paths.iniPath,
+    bin_dir: paths.binDir,
+    db,
+    elevated,
+  };
+
+  if (dryRun) {
+    return sendCommandResult(
+      commandId,
+      RES,
+      elevated ? "COMPLETED" : "FAILED",
+      { dry_run: true, ready: elevated, ...readiness },
+      elevated ? undefined : "NOT_ELEVATED",
+      elevated
+        ? undefined
+        : "Agent lacks admin rights to restart the DB service",
+    );
+  }
+  if (!elevated)
+    return fail(
+      "NOT_ELEVATED",
+      "Agent lacks admin rights to restart the DB service",
+      readiness,
+    );
+
+  // 3) REAL provisioning
+  const password = odProvision.generatePassword((n) =>
+    require("crypto").randomBytes(n),
+  );
+  const initSqlPath = path.join(
+    process.env.ProgramData || "C:\\ProgramData",
+    "edifi-provision.sql",
+  );
+  const initSqlFwd = initSqlPath.replace(/\\/g, "/");
+  const backupPath = paths.iniPath + ".edifi-bak";
+
+  const restart = async () => {
+    try {
+      sh(`sc stop "${svc}"`, { stdio: "ignore", timeout: 20000 });
+    } catch {}
+    for (let i = 0; i < 15; i++) {
+      await sleep(1000);
+      try {
+        if (/STOPPED/i.test(sh(`sc query "${svc}"`))) break;
+      } catch {}
+    }
+    sh(`sc start "${svc}"`, { stdio: "ignore", timeout: 20000 });
+  };
+  const waitDbUp = async (ms = 40000) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const ok = await new Promise((res) => {
+        const s = new net.Socket();
+        s.setTimeout(2000);
+        s.connect(3306, "127.0.0.1", () => {
+          s.destroy();
+          res(true);
+        });
+        s.on("error", () => {
+          s.destroy();
+          res(false);
+        });
+        s.on("timeout", () => {
+          s.destroy();
+          res(false);
+        });
+      });
+      if (ok) return true;
+      await sleep(1500);
+    }
+    return false;
+  };
+
+  let iniModified = false;
+  try {
+    fs.copyFileSync(paths.iniPath, backupPath);
+    if (!fs.existsSync(backupPath))
+      return fail("BACKUP_FAILED", "Could not back up my.ini", readiness);
+    fs.writeFileSync(
+      initSqlPath,
+      odProvision.buildInitSql(db, password),
+      "ascii",
+    );
+    const { text, injected } = odProvision.injectInitFile(
+      fs.readFileSync(paths.iniPath, "utf8"),
+      initSqlFwd,
+    );
+    if (!injected) throw new Error("no [mysqld] section");
+    fs.writeFileSync(paths.iniPath, text, "utf8");
+    iniModified = true;
+
+    await restart();
+    const up = await waitDbUp();
+    // restore clean my.ini (init_file removed); a created user persists in the DB
+    fs.copyFileSync(backupPath, paths.iniPath);
+    iniModified = false;
+    try {
+      fs.unlinkSync(initSqlPath);
+    } catch {}
+    if (!up) {
+      await restart();
+      return fail(
+        "DB_RESTART_TIMEOUT",
+        "DB did not come back up; my.ini restored",
+        readiness,
+      );
+    }
+
+    // verify edifi_ro can connect + read
+    const mysql = require("mysql2/promise");
+    let verified = false,
+      verr = null;
+    try {
+      const c = await mysql.createConnection({
+        host: "127.0.0.1",
+        port: 3306,
+        user: odProvision.NEW_USER,
+        password,
+        database: db,
+        connectTimeout: 6000,
+      });
+      await c.query("SELECT 1");
+      await c.end();
+      verified = true;
+    } catch (e) {
+      verr = e.code || "ERR";
+    }
+    if (!verified)
+      return fail(
+        "VERIFY_FAILED",
+        `edifi_ro created but verify failed (${verr})`,
+        readiness,
+      );
+
+    // wire it in for subsequent SYNC — password stays local, never in the result
+    const mysqlCfg = {
+      host: "127.0.0.1",
+      port: 3306,
+      database: db,
+      user: odProvision.NEW_USER,
+      password,
+    };
+    setManualMysqlConfig(mysqlCfg);
+    config.od_mysql = mysqlCfg;
+    saveConfig();
+    sendCommandResult(commandId, RES, "COMPLETED", {
+      dry_run: false,
+      provisioned: true,
+      user: odProvision.NEW_USER,
+      ...readiness,
+    });
+  } catch (e) {
+    try {
+      if (iniModified && fs.existsSync(backupPath)) {
+        fs.copyFileSync(backupPath, paths.iniPath);
+        await restart();
+      }
+    } catch {}
+    try {
+      fs.unlinkSync(initSqlPath);
+    } catch {}
+    return fail("PROVISION_ERROR", "Provisioning failed; my.ini restored", {
+      ...readiness,
+      detail: (e.code || e.message || "err").toString().slice(0, 120),
+    });
+  }
 }
 
 // ── SET_MYSQL_CONFIG ──────────────────────────────────────────────────────────
