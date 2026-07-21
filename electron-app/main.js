@@ -982,8 +982,9 @@ function reconcileProvisionJournal() {
     if (!j.svc || !j.iniPath || !j.backupPath || !fs.existsSync(j.backupPath))
       return keep("backup missing");
     const buf = fs.readFileSync(j.backupPath);
-    if (j.origHash && hash(buf) !== j.origHash)
-      return keep("backup hash mismatch");
+    // A journal with no recorded hash is untrusted — never restore blindly.
+    if (!j.origHash || hash(buf) !== j.origHash)
+      return keep("backup hash missing/mismatch");
 
     // Atomic restore, then verify the destination bytes.
     const tmp = j.iniPath + ".recotmp";
@@ -992,45 +993,60 @@ function reconcileProvisionJournal() {
     if (hash(fs.readFileSync(j.iniPath)) !== hash(buf))
       return keep("restore verify failed");
 
-    // Start the service and require it to reach RUNNING before any cleanup.
-    try {
-      execSync(`sc start "${j.svc}"`, {
-        stdio: "ignore",
-        timeout: 20000,
-        shell: true,
-      });
-    } catch {}
+    // Drive the service to RUNNING: reissue `sc start` whenever it is STOPPED
+    // (covers a crash during STOP_PENDING where the first start would fail).
     let running = false;
     for (let i = 0; i < 20; i++) {
+      let state = "?";
       try {
-        if (
-          /STATE\s*:\s*\d+\s+RUNNING/i.test(
+        state =
+          (/STATE\s*:\s*\d+\s+(\w+)/i.exec(
             execSync(`sc query "${j.svc}"`, {
               encoding: "utf8",
               timeout: 5000,
               shell: true,
             }),
-          )
-        ) {
-          running = true;
-          break;
-        }
+          ) || [])[1] || "?";
       } catch {}
+      if (/RUNNING/i.test(state)) {
+        running = true;
+        break;
+      }
+      if (/STOPPED/i.test(state)) {
+        try {
+          execSync(`sc start "${j.svc}"`, {
+            stdio: "ignore",
+            timeout: 20000,
+            shell: true,
+          });
+        } catch {}
+      }
       try {
         execSync("ping 127.0.0.1 -n 2 >nul", { timeout: 4000, shell: true });
       } catch {}
     }
     if (!running) return keep(`${j.svc} not RUNNING after restore`);
 
-    // Only now safe to remove recovery data.
-    try {
-      if (j.initSqlPath) fs.unlinkSync(j.initSqlPath);
-    } catch {}
+    // DB restored + service up. Clean up; the init SQL holds the pw so warn if it lingers.
+    let sqlGone = true;
+    if (j.initSqlPath) {
+      sqlGone = false;
+      for (let i = 0; i < 3 && !sqlGone; i++) {
+        try {
+          fs.unlinkSync(j.initSqlPath);
+        } catch {}
+        sqlGone = !fs.existsSync(j.initSqlPath);
+      }
+      if (!sqlGone)
+        log(`Provision reconcile WARNING: could not delete ${j.initSqlPath}`);
+    }
     try {
       fs.unlinkSync(j.backupPath);
     } catch {}
     fs.unlinkSync(PROVISION_JOURNAL);
-    log(`Provision journal reconciled for ${j.svc}`);
+    log(
+      `Provision journal reconciled for ${j.svc}${sqlGone ? "" : " (sql-cleanup-warning)"}`,
+    );
   } catch (e) {
     log(`Provision reconcile error (leaving journal): ${e.message}`);
   }
