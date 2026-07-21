@@ -956,43 +956,83 @@ const PROVISION_JOURNAL = require("path").join(
   "provision-journal.json",
 );
 
-// Repairs an interrupted provisioning at agent startup: restores my.ini from the
-// recorded backup and ensures the DB service is running. Safe no-op if no journal.
+// Repairs an interrupted provisioning at agent startup. FAILS SAFE: if it cannot
+// prove my.ini is restored byte-exact AND the DB service is RUNNING again, it leaves
+// the journal + backup in place and cleans up NOTHING (manual recovery), rather than
+// deleting recovery data or falsely reporting success.
 function reconcileProvisionJournal() {
+  let j = null;
+  const keep = (why) =>
+    log(
+      `Provision reconcile: ${why} — MANUAL RECOVERY, leaving journal/backup`,
+    );
   try {
     if (!fs.existsSync(PROVISION_JOURNAL)) return;
     const { execSync } = require("child_process");
-    const j = JSON.parse(fs.readFileSync(PROVISION_JOURNAL, "utf8"));
-    log(`Provision journal found — reconciling ${j.svc}`);
-    if (j.iniPath && j.backupPath && fs.existsSync(j.backupPath)) {
-      const buf = fs.readFileSync(j.backupPath);
-      const crypto = require("crypto");
-      if (
-        !j.origHash ||
-        crypto.createHash("sha256").update(buf).digest("hex") === j.origHash
-      ) {
-        fs.writeFileSync(j.iniPath, buf); // restore original bytes
-      }
+    const crypto = require("crypto");
+    const hash = (b) => crypto.createHash("sha256").update(b).digest("hex");
+    try {
+      j = JSON.parse(fs.readFileSync(PROVISION_JOURNAL, "utf8"));
+    } catch {
+      return keep("journal unreadable");
     }
-    if (j.svc) {
+    log(`Provision journal found — reconciling ${j.svc}`);
+
+    // Require a valid, hash-matching backup; anything else → manual recovery.
+    if (!j.svc || !j.iniPath || !j.backupPath || !fs.existsSync(j.backupPath))
+      return keep("backup missing");
+    const buf = fs.readFileSync(j.backupPath);
+    if (j.origHash && hash(buf) !== j.origHash)
+      return keep("backup hash mismatch");
+
+    // Atomic restore, then verify the destination bytes.
+    const tmp = j.iniPath + ".recotmp";
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, j.iniPath);
+    if (hash(fs.readFileSync(j.iniPath)) !== hash(buf))
+      return keep("restore verify failed");
+
+    // Start the service and require it to reach RUNNING before any cleanup.
+    try {
+      execSync(`sc start "${j.svc}"`, {
+        stdio: "ignore",
+        timeout: 20000,
+        shell: true,
+      });
+    } catch {}
+    let running = false;
+    for (let i = 0; i < 20; i++) {
       try {
-        execSync(`sc start "${j.svc}"`, {
-          stdio: "ignore",
-          timeout: 20000,
-          shell: true,
-        });
+        if (
+          /STATE\s*:\s*\d+\s+RUNNING/i.test(
+            execSync(`sc query "${j.svc}"`, {
+              encoding: "utf8",
+              timeout: 5000,
+              shell: true,
+            }),
+          )
+        ) {
+          running = true;
+          break;
+        }
+      } catch {}
+      try {
+        execSync("ping 127.0.0.1 -n 2 >nul", { timeout: 4000, shell: true });
       } catch {}
     }
+    if (!running) return keep(`${j.svc} not RUNNING after restore`);
+
+    // Only now safe to remove recovery data.
     try {
       if (j.initSqlPath) fs.unlinkSync(j.initSqlPath);
     } catch {}
     try {
-      if (j.backupPath) fs.unlinkSync(j.backupPath);
+      fs.unlinkSync(j.backupPath);
     } catch {}
     fs.unlinkSync(PROVISION_JOURNAL);
     log(`Provision journal reconciled for ${j.svc}`);
   } catch (e) {
-    log(`Provision reconcile error: ${e.message}`);
+    log(`Provision reconcile error (leaving journal): ${e.message}`);
   }
 }
 
@@ -1219,9 +1259,12 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
     return { ok: await waitDbUp(), why: "db_down_after_restore" };
   };
   const secureDelete = (p) => {
-    try {
-      fs.unlinkSync(p);
-    } catch {}
+    for (let i = 0; i < 3; i++) {
+      try {
+        fs.unlinkSync(p);
+      } catch {}
+      if (!fs.existsSync(p)) return true;
+    }
     return !fs.existsSync(p);
   };
 
@@ -1270,8 +1313,9 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
         readiness,
       );
     }
-    secureDelete(initSqlPath);
+    const sqlCleaned = secureDelete(initSqlPath); // holds the pw — surface if it lingers
     secureDelete(backupPath);
+    readiness.cleanup_warning = !sqlCleaned || undefined;
     try {
       fs.unlinkSync(PROVISION_JOURNAL);
       journaled = false;
