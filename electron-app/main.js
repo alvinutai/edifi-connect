@@ -939,19 +939,68 @@ function readOdFreeDentalConfig() {
 
 // ── PROVISION_OD_READONLY_USER ────────────────────────────────────────────────
 // Creates a read-only edifi_ro login on the local MariaDB/MySQL using the engine's
-// init-file mechanism (runs as server admin at startup, no existing password). Used
-// when the OD-stored DB password can't be recovered. Never alters OD's root login.
-// dry_run: discover + elevation + safety checks only, changes NOTHING. Real run:
-// backs up my.ini (in-memory hash + on-disk copy), atomically injects init_file,
-// restarts the DB service, restores my.ini and VERIFIES the restore + DB health,
-// verifies edifi_ro, then persists. Any failure rolls back and reports
-// MANUAL_RECOVERY_REQUIRED if it cannot prove the DB is healthy again.
+// init-file mechanism (server admin at startup, no existing password). Never alters
+// OD's root login. Used only when OD talks to a LOCAL DB whose stored password can't
+// be recovered. dry_run: discover + safety checks only, changes NOTHING. Real run
+// writes a crash-recovery journal, atomically injects init_file, restarts the DB,
+// then restores my.ini BYTE-FOR-BYTE (verified by hash) + confirms the DB is healthy.
+// A mid-run crash is repaired at next agent startup by reconcileProvisionJournal().
 // HIGH-RISK (restarts the DB service): gate + permission enforced backend-side.
+
+const PROVISION_DIR = require("path").join(
+  process.env.ProgramData || "C:\\ProgramData",
+  "EDiFiConnect",
+);
+const PROVISION_JOURNAL = require("path").join(
+  PROVISION_DIR,
+  "provision-journal.json",
+);
+
+// Repairs an interrupted provisioning at agent startup: restores my.ini from the
+// recorded backup and ensures the DB service is running. Safe no-op if no journal.
+function reconcileProvisionJournal() {
+  try {
+    if (!fs.existsSync(PROVISION_JOURNAL)) return;
+    const { execSync } = require("child_process");
+    const j = JSON.parse(fs.readFileSync(PROVISION_JOURNAL, "utf8"));
+    log(`Provision journal found — reconciling ${j.svc}`);
+    if (j.iniPath && j.backupPath && fs.existsSync(j.backupPath)) {
+      const buf = fs.readFileSync(j.backupPath);
+      const crypto = require("crypto");
+      if (
+        !j.origHash ||
+        crypto.createHash("sha256").update(buf).digest("hex") === j.origHash
+      ) {
+        fs.writeFileSync(j.iniPath, buf); // restore original bytes
+      }
+    }
+    if (j.svc) {
+      try {
+        execSync(`sc start "${j.svc}"`, {
+          stdio: "ignore",
+          timeout: 20000,
+          shell: true,
+        });
+      } catch {}
+    }
+    try {
+      if (j.initSqlPath) fs.unlinkSync(j.initSqlPath);
+    } catch {}
+    try {
+      if (j.backupPath) fs.unlinkSync(j.backupPath);
+    } catch {}
+    fs.unlinkSync(PROVISION_JOURNAL);
+    log(`Provision journal reconciled for ${j.svc}`);
+  } catch (e) {
+    log(`Provision reconcile error: ${e.message}`);
+  }
+}
+
 let provisioningInProgress = false;
 async function handleProvisionOdReadonlyUser(commandId, payload) {
   const RES = "PROVISION_OD_READONLY_USER";
   const dryRun = payload?.dry_run === true || payload?.dry_run === "true";
-  const { execSync } = require("child_process");
+  const { execSync, execFileSync } = require("child_process");
   const path = require("path");
   const net = require("net");
   const crypto = require("crypto");
@@ -968,22 +1017,48 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
   const sh = (cmd, opts = {}) =>
     execSync(cmd, { encoding: "utf8", timeout: 15000, shell: true, ...opts });
 
-  // discover DB service(s) — require exactly one RUNNING MySQL/MariaDB service so we
-  // never restart an unrelated database.
-  let services;
+  // OD must point at a LOCAL database, or provisioning a local DB would be wrong.
+  const od = readOdFreeDentalConfig();
+  if (!od || !odProvision.isLocalHost(od.host)) {
+    return fail(
+      "NOT_LOCAL_OD_DB",
+      "Open Dental is not configured for a local database",
+      { od_host: od && od.host },
+    );
+  }
+  const db = od.database || "opendental";
+  const dbPort = parseInt(od.port || "3306", 10) || 3306;
   try {
-    services = odProvision.parseDbServices(sh("sc query type= all state= all"));
+    odProvision.assertSafeDbName(db);
+  } catch {
+    return fail("UNSAFE_DB_NAME", "Refusing an unsafe db identifier");
+  }
+
+  // Robust full service enumeration (no sc-query pagination truncation).
+  let dbServices;
+  try {
+    const psOut = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Service | Where-Object { $_.Name -match 'mysql|maria' } | Select-Object Name,State,PathName | ConvertTo-Json -Compress",
+      ],
+      { encoding: "utf8", timeout: 20000, windowsHide: true },
+    );
+    dbServices = odProvision.parseServicesJson(psOut);
   } catch (e) {
-    return fail("DISCOVERY_ERROR", "Service discovery failed", {
+    return fail("DISCOVERY_ERROR", "Service enumeration failed", {
       detail: (e.code || "err").toString(),
     });
   }
-  const running = services.filter((s) => s.running);
+  const running = dbServices.filter((s) => s.running);
   if (running.length === 0)
     return fail(
       "DB_SERVICE_NOT_FOUND",
       "No running MySQL/MariaDB service found",
-      { candidates: services.map((s) => s.name) },
+      { candidates: dbServices.map((s) => s.name) },
     );
   if (running.length > 1)
     return fail(
@@ -992,32 +1067,13 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
       { candidates: running.map((s) => s.name) },
     );
   const svc = running[0].name;
-
-  let paths;
-  try {
-    paths = odProvision.parseServicePaths(sh(`sc qc "${svc}"`));
-  } catch (e) {
-    return fail("DISCOVERY_ERROR", "Service config read failed", {
-      service: svc,
-    });
-  }
+  const paths = odProvision.parseServicePaths(running[0].pathName || "");
   if (!paths.iniPath || !paths.binDir)
     return fail(
       "DB_CONFIG_NOT_FOUND",
       `Could not resolve my.ini/bin dir for ${svc}`,
       { service: svc },
     );
-
-  const od = readOdFreeDentalConfig();
-  const db = (od && od.database) || "opendental";
-  const dbPort = parseInt((od && od.port) || "3306", 10) || 3306;
-  try {
-    odProvision.assertSafeDbName(db);
-  } catch {
-    return fail("UNSAFE_DB_NAME", "Refusing an unsafe db identifier", {
-      service: svc,
-    });
-  }
 
   let elevated = false;
   try {
@@ -1027,15 +1083,16 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
     elevated = false;
   }
 
-  let iniText;
+  let iniBuf;
   try {
-    iniText = fs.readFileSync(paths.iniPath, "utf8");
+    iniBuf = fs.readFileSync(paths.iniPath);
   } catch {
     return fail("INI_READ_FAILED", "Could not read my.ini", {
       service: svc,
       ini_path: paths.iniPath,
     });
   }
+  const iniText = iniBuf.toString("utf8");
   const hasOperatorInit = odProvision.hasInitFile(iniText);
   const readiness = {
     service: svc,
@@ -1083,18 +1140,24 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
   provisioningInProgress = true;
 
   const stamp = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
-  const initSqlPath = path.join(
-    process.env.ProgramData || "C:\\ProgramData",
-    `edifi-provision-${stamp}.sql`,
-  );
-  const initSqlFwd = initSqlPath.replace(/\\/g, "/");
+  try {
+    fs.mkdirSync(PROVISION_DIR, { recursive: true });
+  } catch {}
+  // Best-effort ACL lockdown of the dir holding the short-lived init SQL (has the pw).
+  try {
+    execSync(
+      `icacls "${PROVISION_DIR}" /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul 2>&1`,
+      { timeout: 8000, shell: true },
+    );
+  } catch {}
+  const initSqlPath = path.join(PROVISION_DIR, `edifi-provision-${stamp}.sql`);
   const backupPath = paths.iniPath + `.edifi-bak-${stamp}`;
   const password = odProvision.generatePassword((n) => crypto.randomBytes(n));
-  const origHash = crypto.createHash("sha256").update(iniText).digest("hex");
-  const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
+  const origHash = crypto.createHash("sha256").update(iniBuf).digest("hex");
+  const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
   const atomicWrite = (p, content) => {
     const tmp = p + `.tmp-${stamp}`;
-    fs.writeFileSync(tmp, content, "utf8");
+    fs.writeFileSync(tmp, content);
     fs.renameSync(tmp, p);
   };
   const svcState = () => {
@@ -1143,25 +1206,33 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
     }
     return false;
   };
-  // Restore my.ini to the exact original, verify by hash, restart, and confirm the DB
-  // is reachable. Returns {ok, why}. Used on every recovery path.
+  // Restore my.ini to the original BYTES, verify by hash, restart, confirm DB up.
   const restoreAndVerify = async () => {
     try {
-      atomicWrite(paths.iniPath, iniText);
-    } catch (e) {
+      atomicWrite(paths.iniPath, iniBuf);
+    } catch {
       return { ok: false, why: "ini_restore_write_failed" };
     }
-    if (sha(fs.readFileSync(paths.iniPath, "utf8")) !== origHash)
+    if (sha(fs.readFileSync(paths.iniPath)) !== origHash)
       return { ok: false, why: "ini_restore_mismatch" };
     await restart();
     return { ok: await waitDbUp(), why: "db_down_after_restore" };
   };
+  const secureDelete = (p) => {
+    try {
+      fs.unlinkSync(p);
+    } catch {}
+    return !fs.existsSync(p);
+  };
 
   let iniModified = false;
+  let journaled = false;
   try {
-    fs.copyFileSync(paths.iniPath, backupPath); // on-disk belt-and-suspenders backup
-
-    const { text, injected } = odProvision.injectInitFile(iniText, initSqlFwd);
+    fs.writeFileSync(backupPath, iniBuf); // on-disk byte backup
+    const { text, injected } = odProvision.injectInitFile(
+      iniText,
+      initSqlPath.replace(/\\/g, "/"),
+    );
     if (!injected) throw new Error("no_mysqld_section");
     fs.writeFileSync(
       initSqlPath,
@@ -1169,27 +1240,41 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
       "ascii",
     );
 
+    // journal BEFORE mutation so a crash is repairable at next startup
+    fs.writeFileSync(
+      PROVISION_JOURNAL,
+      JSON.stringify({
+        svc,
+        iniPath: paths.iniPath,
+        backupPath,
+        initSqlPath,
+        origHash,
+        ts: stamp,
+      }),
+    );
+    journaled = true;
+
     iniModified = true; // set BEFORE the write so any throw triggers rollback
     atomicWrite(paths.iniPath, text);
 
     await restart();
     const up = await waitDbUp();
 
-    // always return my.ini to the original and prove it + the DB are healthy again
     const restored = await restoreAndVerify();
     iniModified = false;
     if (!restored.ok) {
+      // leave journal + backup for the startup reconciler / manual recovery
       return fail(
         "MANUAL_RECOVERY_REQUIRED",
-        `my.ini/DB not healthy after restore (${restored.why}). On-disk backup: ${backupPath}`,
+        `my.ini/DB not healthy after restore (${restored.why}); backup ${backupPath}`,
         readiness,
       );
     }
+    secureDelete(initSqlPath);
+    secureDelete(backupPath);
     try {
-      fs.unlinkSync(initSqlPath);
-    } catch {}
-    try {
-      fs.unlinkSync(backupPath);
+      fs.unlinkSync(PROVISION_JOURNAL);
+      journaled = false;
     } catch {}
     if (!up)
       return fail(
@@ -1198,7 +1283,6 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
         readiness,
       );
 
-    // verify edifi_ro authenticates + reads
     const mysql = require("mysql2/promise");
     let verr = null;
     try {
@@ -1222,7 +1306,6 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
         readiness,
       );
 
-    // persist locally and confirm it actually hit disk before declaring success
     const mysqlCfg = {
       host: "127.0.0.1",
       port: dbPort,
@@ -1244,7 +1327,7 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
     if (!persisted)
       return fail(
         "PERSIST_FAILED",
-        "edifi_ro verified but config not persisted; rerun will rotate + retry cleanly",
+        "edifi_ro verified but config not persisted; rerun rotates + retries cleanly",
         readiness,
       );
 
@@ -1263,25 +1346,23 @@ async function handleProvisionOdReadonlyUser(commandId, payload) {
       }));
       recovery = r.ok ? "restored" : "FAILED:" + r.why;
     }
-    try {
-      fs.unlinkSync(initSqlPath);
-    } catch {}
     const healthy = recovery === "restored" || recovery === "not_modified";
     if (healthy) {
+      secureDelete(initSqlPath);
+      secureDelete(backupPath);
       try {
-        fs.unlinkSync(backupPath);
+        if (journaled) fs.unlinkSync(PROVISION_JOURNAL);
       } catch {}
     }
     return fail(
       healthy ? "PROVISION_ERROR" : "MANUAL_RECOVERY_REQUIRED",
-      `Provisioning failed (${(e.code || e.message || "err").toString().slice(0, 60)}); recovery=${recovery}${healthy ? "" : "; on-disk backup " + backupPath}`,
+      `Provisioning failed (${(e.code || e.message || "err").toString().slice(0, 60)}); recovery=${recovery}${healthy ? "" : "; backup " + backupPath}`,
       readiness,
     );
   } finally {
     provisioningInProgress = false;
   }
 }
-
 // ── SET_MYSQL_CONFIG ──────────────────────────────────────────────────────────
 // Stores OD MySQL credentials locally in config.json and applies them immediately.
 // Password is NEVER logged. Only success/failure is reported in the result.
@@ -5665,6 +5746,9 @@ ipcMain.handle("get-config", () => ({
 
 app.whenReady().then(() => {
   loadConfig();
+
+  // Repair any provisioning interrupted by a crash before the bridge comes up.
+  reconcileProvisionJournal();
 
   // Wire OD MySQL logger to main app log — failures now show in edifi-connect.log
   setMysqlLogger((msg) => log(`[OD MySQL] ${msg}`));

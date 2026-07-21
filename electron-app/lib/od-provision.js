@@ -27,15 +27,47 @@ function parseDbServices(scQueryOutput) {
   return out;
 }
 
+// Parse Get-CimInstance Win32_Service JSON (robust full enumeration, no sc-query
+// pagination limits) → [{ name, running, pathName }] for mysql/maria services only.
+function parseServicesJson(jsonText) {
+  let data;
+  try {
+    data = JSON.parse(jsonText);
+  } catch {
+    return [];
+  }
+  const arr = Array.isArray(data) ? data : data ? [data] : [];
+  return arr
+    .filter((s) => s && /mysql|maria/i.test(s.Name || ""))
+    .map((s) => ({
+      name: s.Name,
+      running: String(s.State || "").toLowerCase() === "running",
+      pathName: s.PathName || "",
+    }));
+}
+
+// True only when OD is configured to talk to a LOCAL database — this provisioner
+// must never restart a service when OD points at a remote server.
+function isLocalHost(host) {
+  return ["localhost", "127.0.0.1", "::1", ".", ""].includes(
+    String(host || "")
+      .trim()
+      .toLowerCase(),
+  );
+}
+
 // Parse `sc qc <svc>` output for the mysqld/mariadbd binary path and its
 // --defaults-file (my.ini). Returns { exePath, iniPath, binDir } (nulls if absent).
-function parseServicePaths(scQcOutput) {
-  const bin = scQcOutput.match(/BINARY_PATH_NAME\s*:\s*(.+)/i);
+function parseServicePaths(scQcOutputOrPathLine) {
+  const bin = scQcOutputOrPathLine.match(/BINARY_PATH_NAME\s*:\s*(.+)/i);
+  // Accept either `sc qc` output (has BINARY_PATH_NAME:) or a bare binary-path line
+  // (Get-CimInstance PathName).
+  const rawLine = bin ? bin[1] : scQcOutputOrPathLine;
   let exePath = null;
   let iniPath = null;
   let binDir = null;
-  if (bin) {
-    const line = bin[1].trim();
+  {
+    const line = rawLine.trim();
     const exe =
       line.match(/"([^"]*mysqld[^"]*\.exe|[^"]*mariadbd[^"]*\.exe)"/i) ||
       line.match(/(\S*mysqld\.exe|\S*mariadbd\.exe)/i);
@@ -123,6 +155,8 @@ function generatePassword(randomBytes) {
 module.exports = {
   NEW_USER,
   parseDbServices,
+  parseServicesJson,
+  isLocalHost,
   parseServicePaths,
   injectInitFile,
   removeInitFile,

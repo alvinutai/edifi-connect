@@ -59,6 +59,48 @@ test("parseServicePaths extracts mysqld exe, bin dir, and my.ini (spaces in path
   assert.strictEqual(r.iniPath, "C:\\Program Files\\MariaDB 10.11\\my.ini");
 });
 
+test("parseServicePaths also accepts a bare Get-CimInstance PathName line", () => {
+  const line =
+    '"C:\\Program Files\\MariaDB 10.11\\bin\\mysqld.exe" "--defaults-file=C:\\Program Files\\MariaDB 10.11\\my.ini" "MySQL"';
+  const r = p.parseServicePaths(line);
+  assert.strictEqual(r.iniPath, "C:\\Program Files\\MariaDB 10.11\\my.ini");
+  assert.strictEqual(r.binDir, "C:\\Program Files\\MariaDB 10.11\\bin");
+});
+
+test("parseServicesJson filters to mysql/maria with running state (array + single)", () => {
+  const arr = JSON.stringify([
+    { Name: "MySQL", State: "Running", PathName: "x" },
+    { Name: "Spooler", State: "Running", PathName: "y" },
+    { Name: "MariaDB2", State: "Stopped", PathName: "z" },
+  ]);
+  const r = p.parseServicesJson(arr);
+  assert.deepStrictEqual(
+    r.map((s) => [s.name, s.running]),
+    [
+      ["MySQL", true],
+      ["MariaDB2", false],
+    ],
+  );
+  const single = JSON.stringify({
+    Name: "MySQL",
+    State: "Running",
+    PathName: "x",
+  });
+  assert.strictEqual(p.parseServicesJson(single).length, 1);
+});
+
+test("parseServicesJson returns [] on empty/garbage", () => {
+  assert.deepStrictEqual(p.parseServicesJson(""), []);
+  assert.deepStrictEqual(p.parseServicesJson("not json"), []);
+});
+
+test("isLocalHost accepts local forms, rejects a remote host", () => {
+  for (const h of ["localhost", "127.0.0.1", "::1", ".", ""])
+    assert.ok(p.isLocalHost(h), h);
+  assert.ok(!p.isLocalHost("db.remote.example.com"));
+  assert.ok(!p.isLocalHost("192.168.1.50"));
+});
+
 test("injectInitFile inserts init_file directly under [mysqld]", () => {
   const ini = "[client]\nport=3306\n[mysqld]\ndatadir=C:/x\nport=3306\n";
   const { text, injected } = p.injectInitFile(
