@@ -4245,6 +4245,16 @@ async function syncODMySql(syncDate) {
           proc_codes: procCodes,
           est_patient_cents: estPatientCents,
           fee_appt_cents: feeApptCents,
+          operatory: apt.Op ?? null,
+          operatory_name: apt.OpName ?? null,
+          operatory_abbrev: apt.OpAbbrev ?? null,
+          pattern: apt.Pattern ?? null,
+          duration_minutes: apt.DurationMin ?? null,
+          provider_abbr: apt.ProvAbbr ?? null,
+          hygienist_abbr: apt.HygAbbr ?? null,
+          apt_status: apt.AptStatus ?? null,
+          production_cents:
+            apt.Production != null ? Math.round(Number(apt.Production) * 100) : null,
           source: "od_mysql",
         });
       } catch (e) {

@@ -493,12 +493,24 @@ async function getAppointmentsForDate(date) {
   try {
     const [rows] = await p.query(
       `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              a.Op, a.Pattern, a.ProvNum, a.ProvHyg, a.AptStatus,
+              CHAR_LENGTH(a.Pattern) * 5 AS DurationMin,
               p.FName, p.LName, p.Birthdate,
-              p.HmPhone, p.WkPhone, p.Email
+              p.HmPhone, p.WkPhone, p.Email,
+              op.OpName, op.Abbrev AS OpAbbrev,
+              prov.Abbr AS ProvAbbr,
+              hyg.Abbr  AS HygAbbr,
+              (SELECT ROUND(SUM(pl.ProcFee), 2)
+                 FROM procedurelog pl
+                WHERE pl.AptNum = a.AptNum
+                  AND pl.ProcStatus IN (1, 2)) AS Production
        FROM appointment a
-       JOIN patient p ON p.PatNum = a.PatNum
+       LEFT JOIN patient   p    ON p.PatNum        = a.PatNum
+       LEFT JOIN operatory op   ON op.OperatoryNum = a.Op
+       LEFT JOIN provider  prov ON prov.ProvNum    = a.ProvNum
+       LEFT JOIN provider  hyg  ON hyg.ProvNum      = a.ProvHyg
        WHERE DATE(a.AptDateTime) = ?
-         AND a.AptStatus IN (1, 2)
+         AND a.AptStatus IN (1, 2, 4, 5, 7, 8)
        ORDER BY a.AptDateTime`,
       [targetDate],
     );
