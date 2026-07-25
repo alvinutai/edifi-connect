@@ -510,7 +510,7 @@ async function getAppointmentsForDate(date) {
        LEFT JOIN provider  prov ON prov.ProvNum    = a.ProvNum
        LEFT JOIN provider  hyg  ON hyg.ProvNum      = a.ProvHyg
        WHERE DATE(a.AptDateTime) = ?
-         AND a.AptStatus IN (1, 2, 4, 5, 7, 8)
+         AND a.AptStatus IN (1, 2)
        ORDER BY a.AptDateTime`,
       [targetDate],
     );
