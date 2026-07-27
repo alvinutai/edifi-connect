@@ -4165,6 +4165,32 @@ async function getOdProcCodes() {
 }
 
 /**
+ * Folds one patient's MySQL benefit array into the sync-wide stats and returns
+ * the plain array for the push frame.
+ *
+ * The annotations od-mysql attaches (`_raw_received`, `_dropped`,
+ * `_dropped_reasons`, `_fallback_reasons`) are non-enumerable in practice only
+ * because they sit on an array — JSON.stringify drops them — so the frame
+ * carries the aggregate in `benefit_stats` instead, mirroring exactly what the
+ * REST sync reports. Without this, MySQL-path drops would be invisible to the
+ * office and to the backend's own ignored-type evidence.
+ */
+function accumulateMysqlBenefitStats(benefits, stats) {
+  const arr = Array.isArray(benefits) ? benefits : [];
+  stats.raw_benefit_rows_received += arr._raw_received ?? arr.length;
+  stats.mapped_benefit_rows += arr.length;
+  stats.dropped_benefit_rows += arr._dropped ?? 0;
+  for (const [k, v] of Object.entries(arr._dropped_reasons ?? {})) {
+    stats.dropped_reason_counts[k] = (stats.dropped_reason_counts[k] || 0) + v;
+  }
+  for (const [k, v] of Object.entries(arr._fallback_reasons ?? {})) {
+    stats.fallback_reason_counts[k] =
+      (stats.fallback_reason_counts[k] || 0) + v;
+  }
+  return arr;
+}
+
+/**
  * Which OD read path this sync uses (Fable ruling R2).
  *
  * The identical-board design lives on the MySQL read path: it is the only
@@ -4872,6 +4898,16 @@ async function syncODMySql(syncDate) {
     // Category 2), pushed once per frame rather than per appointment. Skipped
     // silently on an OD that does not expose it — the board keeps its current
     // status colors.
+    // B-014 on the MySQL path: the same drop/fallback accounting the REST sync
+    // already reports, aggregated across every patient in this push. Counts and
+    // reason keys only — no PHI, no benefit values.
+    const mysqlBenefitStats = {
+      raw_benefit_rows_received: 0,
+      mapped_benefit_rows: 0,
+      dropped_benefit_rows: 0,
+      dropped_reason_counts: {},
+      fallback_reason_counts: {},
+    };
     let statusDefinitions = [];
     try {
       statusDefinitions = await getStatusDefinitions();
@@ -4928,7 +4964,10 @@ async function syncODMySql(syncDate) {
             Email: apt.Email,
           },
           insurance: snapshot.plans,
-          benefits: snapshot.benefits,
+          benefits: accumulateMysqlBenefitStats(
+            snapshot.benefits,
+            mysqlBenefitStats,
+          ),
           proc_codes: procCodes,
           est_patient_cents: estPatientCents,
           fee_appt_cents: feeApptCents,
@@ -4978,6 +5017,15 @@ async function syncODMySql(syncDate) {
     log(
       `[OD MySQL Sync] Pushing ${enriched.length} appointments to EDiFi Cloud...`,
     );
+    // Same diagnostic line the REST path emits, so a drop is visible in the
+    // agent log without pulling the frame. Counts and reason keys only.
+    log(
+      `[OD MySQL Sync] benefit_rows raw=${mysqlBenefitStats.raw_benefit_rows_received}` +
+        ` mapped=${mysqlBenefitStats.mapped_benefit_rows}` +
+        ` dropped=${mysqlBenefitStats.dropped_benefit_rows}` +
+        ` reasons=${JSON.stringify(mysqlBenefitStats.dropped_reason_counts)}` +
+        ` fallbacks=${JSON.stringify(mysqlBenefitStats.fallback_reason_counts)}`,
+    );
     tunnel.send(
       JSON.stringify({
         type: "OD_DATA_PUSH",
@@ -4987,6 +5035,10 @@ async function syncODMySql(syncDate) {
         // AGENT-EXT: office-level, so it rides the frame once rather than on
         // every appointment. [] when this OD does not expose the palette.
         status_definitions: statusDefinitions,
+        // B-014: the MySQL path's own drop/fallback evidence, same shape the
+        // REST sync reports, so a dropped benefit row is visible whichever
+        // path the office runs.
+        benefit_stats: mysqlBenefitStats,
         source: "od_mysql",
       }),
     );

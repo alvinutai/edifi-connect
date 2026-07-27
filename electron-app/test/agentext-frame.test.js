@@ -147,6 +147,24 @@ function buildFrameRow(apt) {
       mainSrc.indexOf("// B-014 fix (2026-07-09)"),
     ) + "\nreturn selectOdBalance(row);",
   );
+  // The frame also folds each patient's benefit array into the sync-wide
+  // B-014 stats; inject the real accumulator rather than a stub so the frame
+  // test exercises what actually runs.
+  const accumulateMysqlBenefitStats = new Function(
+    "benefits",
+    "stats",
+    mainSrc.slice(
+      mainSrc.indexOf("function accumulateMysqlBenefitStats("),
+      mainSrc.indexOf("/**\n * Which OD read path this sync uses"),
+    ) + "\nreturn accumulateMysqlBenefitStats(benefits, stats);",
+  );
+  const mysqlBenefitStats = {
+    raw_benefit_rows_received: 0,
+    mapped_benefit_rows: 0,
+    dropped_benefit_rows: 0,
+    dropped_reason_counts: {},
+    fallback_reason_counts: {},
+  };
   return new Function(
     "apt",
     "snapshot",
@@ -155,8 +173,20 @@ function buildFrameRow(apt) {
     "feeApptCents",
     "typeByAptNum",
     "selectOdBalance",
+    "accumulateMysqlBenefitStats",
+    "mysqlBenefitStats",
     literal,
-  )(apt, { plans: [], benefits: [] }, [], 0, 0, new Map(), selectOdBalance);
+  )(
+    apt,
+    { plans: [], benefits: [] },
+    [],
+    0,
+    0,
+    new Map(),
+    selectOdBalance,
+    accumulateMysqlBenefitStats,
+    mysqlBenefitStats,
+  );
 }
 
 const FULL_ROW = {

@@ -5,6 +5,13 @@
 
 const fs = require("fs");
 const path = require("path");
+// B-014 v6 strict numeric seams. Imported, not re-implemented: the REST mapper
+// (main.js) and lib/benefit-mapper.js already share these two functions, and a
+// third copy here is exactly the divergence the parity gates exist to prevent.
+const {
+  toFiniteNumberOrNull,
+  toNonNegativeFiniteOrNull,
+} = require("./lib/benefit-mapper");
 
 // Common OD installation paths on Windows
 const OD_CONFIG_PATHS = [
@@ -468,18 +475,49 @@ async function getBenefitsForPatient(patNum) {
       [PlanNum, PatPlanNum],
     );
 
-    return rows.map(mapMysqlBenefitRow).filter(Boolean);
+    // B-014: the old `.map(...).filter(Boolean)` discarded rows with no reason
+    // and no count. mapMysqlBenefits keeps the same output shape and attaches
+    // the drop/fallback accounting the REST path already carries.
+    return mapMysqlBenefits(rows);
   } catch {
-    return [];
+    return mapMysqlBenefits([]);
   }
 }
 
-// Pure row mapper for the MySQL benefit path — extracted for unit testing
-// (6D-1B review finding 7). Null-safe against LEFT JOIN misses: ProcCode
-// NULL/empty → null, CodeNum 0/NULL → null, string CodeNum normalized.
-function mapMysqlBenefitRow(r) {
-  const type = BENEFIT_TYPE[r.BenefitType];
-  if (!type) return null;
+/**
+ * Pure row mapper for the MySQL benefit path — B-014 v6 semantics.
+ *
+ * This used to be the uninstrumented twin of the REST mapper: an unrecognized
+ * BenefitType returned null, a negative or NaN percent returned null, and both
+ * disappeared behind `.filter(Boolean)` with no counter and no reason. Since
+ * ruling R2 makes MySQL the design path, that would have re-created B-014 on
+ * the very path the fix was written for.
+ *
+ * Now it never decides a row's fate alone: it BUILDS an entry (unknown type
+ * becomes the `"Other"` fallback, recorded in `fallbackReasons`) and leaves the
+ * keep/drop call to `mapMysqlBenefits`, which records a reason for every drop.
+ *
+ * Numeric parsing goes through the shared non-negative seam, so a real 0% or $0
+ * survives while `-1` (OD's not-entered sentinel), NaN, booleans, arrays and
+ * malformed strings all read as absent.
+ *
+ * Null-safe against LEFT JOIN misses: ProcCode NULL/empty → null, CodeNum
+ * 0/NULL → null, string CodeNum normalized.
+ *
+ * @param {object} r                 raw benefit row
+ * @param {object} [fallbackReasons] mutated when the row rides the Other path
+ */
+function mapMysqlBenefitRow(r, fallbackReasons) {
+  // B-014 §2.A: accept-with-fallback instead of strict-reject. The numeric map
+  // (BENEFIT_TYPE, this file) already covers 4→Other and 5→Note; no numeric
+  // meaning is invented here. MySQL's BenefitType column is numeric, so the
+  // REST path's string "CoPayment" cannot be expressed on this path at all —
+  // see the result report rather than guessing a number for it.
+  const type = BENEFIT_TYPE[r.BenefitType] || "Other";
+  if (!BENEFIT_TYPE[r.BenefitType] && fallbackReasons) {
+    const key = `type_${r.BenefitType}_unmapped_fallback`;
+    fallbackReasons[key] = (fallbackReasons[key] || 0) + 1;
+  }
 
   const category = CATEGORY_MAP[r.EbenefitCat] || r.CategoryDesc || "GENERAL";
   const coverage_level = COVERAGE_LEVEL[r.CoverageLevel] || "None";
@@ -501,25 +539,77 @@ function mapMysqlBenefitRow(r) {
         : null,
   };
   if (type === "CoInsurance") {
-    // Percent = what the plan pays (0-100). Skip -1 (not applicable).
-    const pct = Number(r.Percent);
-    if (isNaN(pct) || pct < 0) return null;
-    benefit.percent = pct;
+    // Percent = what the plan pays. A real 0% is data ("this plan covers none
+    // of it"); -1 is OD's not-entered sentinel and reads as absent.
+    benefit.percent = toNonNegativeFiniteOrNull(r.Percent);
   } else if (type === "Deductible") {
-    benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
+    const cents = toNonNegativeFiniteOrNull(r.MonetaryAmt);
+    benefit.amount_cents = cents != null ? Math.round(cents * 100) : null;
   } else if (type === "Limitations") {
-    // Annual max: MonetaryAmt > 0, no Quantity qualifier
-    // Frequency rule: Quantity > 0 with a QuantityQualifier
-    if (Number(r.MonetaryAmt) > 0) {
-      benefit.amount_cents = Math.round(Number(r.MonetaryAmt) * 100);
-    }
-    if (Number(r.Quantity) > 0 && Number(r.QuantityQualifier) > 0) {
-      benefit.quantity = r.Quantity;
+    // Annual max (a monetary cap) and frequency rules (quantity + qualifier)
+    // both live in this type. The old `> 0` gates dropped a real $0 cap and a
+    // real 0-quantity rule; both are now kept when they parse.
+    const cents = toNonNegativeFiniteOrNull(r.MonetaryAmt);
+    if (cents != null) benefit.amount_cents = Math.round(cents * 100);
+
+    const qty = toNonNegativeFiniteOrNull(r.Quantity);
+    const qualifier = toFiniteNumberOrNull(r.QuantityQualifier);
+    if (qty != null && qualifier != null && qualifier > 0) {
+      benefit.quantity = qty;
       benefit.period = period;
-      benefit.qualifier = r.QuantityQualifier;
+      benefit.qualifier = qualifier;
     }
   }
+  // "Other" and "Note" carry no interpreted value fields, by design: the row's
+  // own type is unrecognized or non-numeric, so no field can be safely assumed
+  // to mean percent/amount/quantity. Same contract as the REST mapper.
   return benefit;
+}
+
+/**
+ * Map a batch of MySQL benefit rows with full B-014 accounting.
+ *
+ * Returns the kept entries, annotated exactly like the REST mapper's output so
+ * both paths surface identically downstream:
+ *   `_raw_received`, `_dropped`, `_dropped_reasons`, `_fallback_reasons`.
+ *
+ * Invariant: `sum(_dropped_reasons) === _raw_received - kept`. Fallback rows
+ * are KEPT and never counted as drops.
+ */
+function mapMysqlBenefits(rawRows) {
+  const rows = Array.isArray(rawRows) ? rawRows : [];
+  const dropped_reasons = {};
+  const fallback_reason_counts = {};
+
+  const mapped = rows.map((r) => mapMysqlBenefitRow(r, fallback_reason_counts));
+
+  const filtered = mapped.filter((b) => {
+    if (b.type === "CoInsurance") {
+      if (b.percent != null) return true;
+      dropped_reasons.coinsurance_invalid_percent =
+        (dropped_reasons.coinsurance_invalid_percent || 0) + 1;
+      return false;
+    }
+    if (b.type === "Deductible") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.deductible_invalid_amount =
+        (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "Limitations") {
+      if (b.quantity != null || b.amount_cents != null) return true;
+      dropped_reasons.limitations_no_valid_value =
+        (dropped_reasons.limitations_no_valid_value || 0) + 1;
+      return false;
+    }
+    return true; // Other / Note are preserved, never dropped by this filter
+  });
+
+  filtered._raw_received = rows.length;
+  filtered._dropped = rows.length - filtered.length;
+  filtered._dropped_reasons = dropped_reasons;
+  filtered._fallback_reasons = fallback_reason_counts;
+  return filtered;
 }
 
 // ─── Patient Lookup by Name + DOB ─────────────────────────────────────────────
@@ -1088,6 +1178,7 @@ module.exports = {
   readOdConfig,
   getBenefitsForPatient,
   mapMysqlBenefitRow,
+  mapMysqlBenefits,
   probeCodeGroupSupport,
   probeAppointmentTypeSupport,
   probeAgentExtColumns,

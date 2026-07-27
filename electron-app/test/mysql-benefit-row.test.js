@@ -5,7 +5,7 @@
  */
 
 const assert = require("assert");
-const { mapMysqlBenefitRow } = require("../od-mysql");
+const { mapMysqlBenefitRow, mapMysqlBenefits } = require("../od-mysql");
 
 let passed = 0;
 let failed = 0;
@@ -72,14 +72,29 @@ test("string CodeNum normalizes to number", () => {
   assert.strictEqual(b.code_num, 87);
 });
 
-test("Percent=-1 (OD not-entered sentinel) drops the row as before", () => {
+// B-014 v6 (PKT-B014-MYSQL) changed WHERE the drop decision is made, not
+// whether these rows survive. The row mapper no longer returns null and no
+// longer decides alone: it builds an entry, and mapMysqlBenefits drops it WITH
+// A REASON. These two cases previously vanished silently.
+
+test("Percent=-1 (OD not-entered sentinel) yields no percent, and drops with a reason", () => {
   const b = mapMysqlBenefitRow(row({ Percent: "-1" }));
-  assert.strictEqual(b, null);
+  assert.notStrictEqual(b, null, "the mapper no longer discards rows itself");
+  assert.strictEqual(b.percent, null);
+
+  const out = mapMysqlBenefits([row({ Percent: "-1" })]);
+  assert.strictEqual(out.length, 0);
+  assert.strictEqual(out._dropped_reasons.coinsurance_invalid_percent, 1);
 });
 
-test("unknown BenefitType drops the row as before", () => {
-  const b = mapMysqlBenefitRow(row({ BenefitType: 9 }));
-  assert.strictEqual(b, null);
+test("unknown BenefitType is preserved as Other, not dropped", () => {
+  const b = mapMysqlBenefitRow(row({ BenefitType: 9 }), {});
+  assert.strictEqual(b.type, "Other");
+
+  const out = mapMysqlBenefits([row({ BenefitType: 9 })]);
+  assert.strictEqual(out.length, 1, "an unknown type must reach the backend");
+  assert.strictEqual(out._dropped, 0);
+  assert.strictEqual(out._fallback_reasons.type_9_unmapped_fallback, 1);
 });
 
 test("Limitations frequency row keeps quantity/period/qualifier with linkage", () => {
@@ -159,9 +174,7 @@ test("missing CodeGroup columns fall back safely with code_group fields null", (
 });
 
 test("empty CodeGroupDesc becomes null", () => {
-  const b = mapMysqlBenefitRow(
-    row({ CodeGroupNum: 7, CodeGroupDesc: "" }),
-  );
+  const b = mapMysqlBenefitRow(row({ CodeGroupNum: 7, CodeGroupDesc: "" }));
   assert.strictEqual(b.code_group_num, 7);
   assert.strictEqual(b.code_group_desc, null);
 });
@@ -175,7 +188,9 @@ test("CodeGroupNum=0 becomes null", () => {
 });
 
 test("exact key set pinned for a mapped CoInsurance entry (additive contract, 6E-1)", () => {
-  const b = mapMysqlBenefitRow(row({ CodeGroupNum: 5, CodeGroupDesc: "Implants" }));
+  const b = mapMysqlBenefitRow(
+    row({ CodeGroupNum: 5, CodeGroupDesc: "Implants" }),
+  );
   assert.deepStrictEqual(Object.keys(b).sort(), [
     "benefit_num",
     "category",
