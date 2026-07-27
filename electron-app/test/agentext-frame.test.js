@@ -138,12 +138,14 @@ function buildFrameRow(apt) {
     .slice(start, end)
     .replace("enriched.push(", "return (")
     .replace(/\);\s*$/, ");");
-  const odBalanceToCents = new Function(
-    "raw",
+  // The frame literal now calls selectOdBalance (which wraps odBalanceToCents
+  // and picks the column that actually parsed). Both live in the same slice.
+  const selectOdBalance = new Function(
+    "row",
     mainSrc.slice(
       mainSrc.indexOf("function odBalanceToCents("),
       mainSrc.indexOf("// B-014 fix (2026-07-09)"),
-    ) + "\nreturn odBalanceToCents(raw);",
+    ) + "\nreturn selectOdBalance(row);",
   );
   return new Function(
     "apt",
@@ -152,9 +154,9 @@ function buildFrameRow(apt) {
     "estPatientCents",
     "feeApptCents",
     "typeByAptNum",
-    "odBalanceToCents",
+    "selectOdBalance",
     literal,
-  )(apt, { plans: [], benefits: [] }, [], 0, 0, new Map(), odBalanceToCents);
+  )(apt, { plans: [], benefits: [] }, [], 0, 0, new Map(), selectOdBalance);
 }
 
 const FULL_ROW = {

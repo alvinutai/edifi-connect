@@ -885,7 +885,12 @@ async function handleSyncOdNow(commandId, payload) {
       );
     }
 
-    if (mysqlOk) {
+    const selection = selectSyncPath({
+      mysqlOk,
+      hasRestConfig: Boolean(config.od_api_url),
+    });
+    logSyncPath(selection, "sync_od_now");
+    if (selection.path === "mysql") {
       await syncODMySql(syncDate);
     } else {
       await syncODData(syncDate);
@@ -3629,17 +3634,23 @@ function connectTunnel() {
       // Also announce any sessions already in memory from this run
       announceSessions();
     });
-    // Start OD sync immediately then every 15 minutes.
-    // If OD Web Service (od_api_url) is not configured, fall back to direct MySQL sync.
-    if (config.od_api_url) {
-      syncODData();
+    // Start OD sync immediately then every 15 minutes. Path selection is the
+    // same rule the on-demand SYNC_OD_NOW uses (R2): MySQL when it is healthy,
+    // REST as the fallback. Previously this branch preferred REST whenever
+    // od_api_url was set, so a MySQL-capable office still synced over the
+    // legacy path — and never received a board field.
+    (async () => {
+      const mysqlOk = await isMysqlAvailable().catch(() => false);
+      const selection = selectSyncPath({
+        mysqlOk,
+        hasRestConfig: Boolean(config.od_api_url),
+      });
+      logSyncPath(selection, "startup_interval");
+      const run = selection.path === "mysql" ? syncODMySql : syncODData;
+      run();
       if (odSyncInterval) clearInterval(odSyncInterval);
-      odSyncInterval = setInterval(syncODData, 15 * 60 * 1000);
-    } else {
-      syncODMySql();
-      if (odSyncInterval) clearInterval(odSyncInterval);
-      odSyncInterval = setInterval(syncODMySql, 15 * 60 * 1000);
-    }
+      odSyncInterval = setInterval(run, 15 * 60 * 1000);
+    })().catch((e) => log(`[OD Sync] path selection failed: ${e.message}`));
     // Auto-run claimprocs + fee schedule on connect (after 60s to let initial OD sync settle)
     // then every 24h — no manual permission needed, just needs CONNECT_REMOTE_OD_SYNC_ENABLED.
     if (odSyncInterval) {
@@ -4154,6 +4165,44 @@ async function getOdProcCodes() {
 }
 
 /**
+ * Which OD read path this sync uses (Fable ruling R2).
+ *
+ * The identical-board design lives on the MySQL read path: it is the only
+ * sender carrying the B1/B1b board work and the AGENT-EXT fields. REST
+ * `syncODData` is the legacy fallback and deliberately does NOT gain them.
+ *
+ * So MySQL wins whenever it is configured and probe-healthy, and REST is the
+ * fallback — not the other way round. That ordering had been inconsistent: the
+ * on-demand SYNC_OD_NOW path already preferred MySQL, while the startup and
+ * 15-minute interval preferred REST whenever `od_api_url` happened to be set.
+ * An office with both configured therefore synced over REST on every scheduled
+ * run and never received a board field, which matches the recorded
+ * `sync_method=od_rest_api` evidence.
+ *
+ * Reads existing config/probe state only — no connection, credential or tunnel
+ * mechanics are touched by choosing.
+ */
+function selectSyncPath({ mysqlOk, hasRestConfig }) {
+  if (mysqlOk) {
+    return {
+      path: "mysql",
+      reason: hasRestConfig ? "mysql_healthy_preferred" : "mysql_only",
+    };
+  }
+  if (hasRestConfig) {
+    return { path: "rest", reason: "mysql_unavailable_rest_fallback" };
+  }
+  return { path: "none", reason: "no_mysql_no_rest_config" };
+}
+
+/** One non-PHI line per selection: path and why. */
+function logSyncPath(selection, context) {
+  log(
+    `[OD Sync] sync_path=${selection.path} reason=${selection.reason} context=${context}`,
+  );
+}
+
+/**
  * AGENT-EXT — OD stores a patient balance in dollars; the backend's appointment
  * ingest reads cents. This is the one conversion the agent does, and only
  * because the unit would otherwise be ambiguous on the wire.
@@ -4163,9 +4212,32 @@ async function getOdProcCodes() {
  * COALESCE keeps whatever it already had.
  */
 function odBalanceToCents(raw) {
-  const n = typeof raw === "string" ? Number(raw.trim()) : raw;
+  let n = raw;
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    // Number("") and Number("   ") are 0. Left unguarded, a blank OD column
+    // became a real $0 balance — and, worse, claimed balance_source: "BalTotal"
+    // while suppressing a perfectly good EstBalance fallback.
+    if (t === "" || !/^-?\d+(\.\d+)?$/.test(t)) return null;
+    n = Number(t);
+  }
   if (typeof n !== "number" || !Number.isFinite(n)) return null;
   return Math.round(n * 100);
+}
+
+/**
+ * The balance the frame should carry, and the column it truly came from.
+ *
+ * `balance_source` may only name a column whose value actually PARSED. A blank
+ * `BalTotal` must fall through to `EstBalance` rather than shadowing it — money
+ * fails closed, and the label has to stay honest about which column answered.
+ */
+function selectOdBalance(row) {
+  for (const column of ["BalTotal", "EstBalance"]) {
+    const cents = odBalanceToCents(row?.[column]);
+    if (cents != null) return { balance_cents: cents, balance_source: column };
+  }
+  return { balance_cents: null, balance_source: null };
 }
 
 // B-014 fix (2026-07-09) — shared strict numeric parser. Accepts real numbers
@@ -4888,15 +4960,9 @@ async function syncODMySql(syncDate) {
           premed: apt.Premed ?? null,
           medical_alert: apt.MedUrgNote ?? null,
           preferred_name: apt.Preferred ?? null,
-          // Whichever balance column this OD has (see AGENT_EXT_COLUMNS).
-          // OD stores dollars; the backend's ingest expects cents.
-          balance_cents: odBalanceToCents(apt.BalTotal ?? apt.EstBalance),
-          balance_source:
-            apt.BalTotal != null
-              ? "BalTotal"
-              : apt.EstBalance != null
-                ? "EstBalance"
-                : null,
+          // Whichever balance column this OD has AND parsed (see
+          // AGENT_EXT_COLUMNS). OD stores dollars; the backend expects cents.
+          ...selectOdBalance(apt),
           source: "od_mysql",
         });
       } catch (e) {

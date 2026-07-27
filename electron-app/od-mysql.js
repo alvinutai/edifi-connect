@@ -86,6 +86,24 @@ function setLogger(fn) {
   logger = fn;
 }
 
+/**
+ * Every cache that describes what the CONNECTED database can do.
+ *
+ * These are properties of a specific MySQL target, not of the process. When the
+ * pool or config changes, a stale capability cache is worse than no cache: the
+ * agent would keep selecting columns that exist on the old database, the
+ * appointment SELECT would throw, and getAppointmentsForDate would return [] —
+ * the blank board the probe exists to prevent.
+ *
+ * Called from every place that already discards `pool`/`available`.
+ */
+function resetCapabilityCaches() {
+  covCatCache = null;
+  codeGroupAvailable = null;
+  appointmentTypeAvailable = null;
+  agentExtColumns = null;
+}
+
 // Called by SET_MYSQL_CONFIG command — accepts manual MySQL credentials directly.
 // Resets connection state so the new config is tested on next isAvailable() call.
 function setManualMysqlConfig(cfg) {
@@ -94,8 +112,7 @@ function setManualMysqlConfig(cfg) {
   configCache = null;
   available = null;
   pool = null;
-  covCatCache = null;
-  codeGroupAvailable = null;
+  resetCapabilityCaches();
   logger(
     `Manual MySQL config loaded — host:${cfg.host} db:${cfg.database} user:${cfg.user}`,
   );
@@ -109,8 +126,7 @@ function clearManualMysqlConfig() {
   configCache = null;
   available = null;
   pool = null;
-  covCatCache = null;
-  codeGroupAvailable = null;
+  resetCapabilityCaches();
 }
 
 // Reset availability every 5 min so transient MySQL failures don't stick permanently
@@ -119,8 +135,7 @@ setInterval(
     if (available === false) {
       available = null;
       pool = null;
-      covCatCache = null;
-      codeGroupAvailable = null;
+      resetCapabilityCaches();
     }
   },
   5 * 60 * 1000,
@@ -641,8 +656,11 @@ async function probeAgentExtColumns() {
     );
     return agentExtColumns;
   } catch (e) {
-    logger(`AGENT-EXT column probe failed (board unaffected): ${e.message}`);
-    agentExtColumns = empty;
+    // NOT cached. A transient information_schema failure would otherwise mean
+    // "this database has no AGENT-EXT columns" for the rest of the process
+    // lifetime, with no retry after the database recovers. This sync degrades
+    // to the pre-P4 query; the next one probes again.
+    logger(`AGENT-EXT column probe failed (retry next sync): ${e.message}`);
     return empty;
   }
 }
