@@ -63,6 +63,7 @@ function inlineMapper(rawBenefits, catMap) {
     Deductible: "Deductible",
     Limitations: "Limitations",
     ActiveCoverage: "CoInsurance",
+    CoPayment: "CoPayment",
   };
   const COV_LEVEL = {
     0: "None",
@@ -111,6 +112,11 @@ function inlineMapper(rawBenefits, catMap) {
       cov_cat_num: Number(b.CovCatNum) || 0,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,
+      code_group_num: Number(b.CodeGroupNum) || null,
+      code_group_desc:
+        typeof b.CodeGroupDesc === "string" && b.CodeGroupDesc
+          ? b.CodeGroupDesc
+          : null,
     };
 
     if (type === "CoInsurance") {
@@ -118,6 +124,10 @@ function inlineMapper(rawBenefits, catMap) {
     } else if (type === "Deductible") {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
+    } else if (type === "CoPayment") {
+      const copayCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents =
+        copayCents != null ? Math.round(copayCents * 100) : null;
     } else if (type === "Limitations") {
       // B-014 §2.B qualifier-aware period synthesis — mirrors main.js and lib.
       entry.qualifier = b.QuantityQualifier ?? null;
@@ -173,6 +183,12 @@ function inlineMapper(rawBenefits, catMap) {
       if (b.amount_cents != null) return true;
       dropped_reasons.deductible_invalid_amount =
         (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "CoPayment") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.copayment_invalid_amount =
+        (dropped_reasons.copayment_invalid_amount || 0) + 1;
       return false;
     }
     if (b.type === "Limitations") {
@@ -268,6 +284,130 @@ const SAMPLES = [
     Percent: "100",
     CoverageLevel: "Individual",
   },
+  // ── B-014 §2.B qualifier branches — every one must be driven through parity ──
+  // NumberOfServices: count kept, window from TimePeriod
+  {
+    BenefitNum: 7,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: "2",
+    TimePeriod: 2,
+    QuantityQualifier: "NumberOfServices",
+    CoverageLevel: "None",
+  },
+  // Integral Years → Years5
+  {
+    BenefitNum: 8,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 9,
+    Quantity: 5,
+    QuantityQualifier: "Years",
+    CoverageLevel: "None",
+  },
+  // Integral Months → Months6
+  {
+    BenefitNum: 9,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: "6",
+    QuantityQualifier: "Months",
+    CoverageLevel: "None",
+  },
+  // Fractional Years → preserved, period None, fallback counted
+  {
+    BenefitNum: 10,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: "1.5",
+    QuantityQualifier: "Years",
+    CoverageLevel: "None",
+  },
+  // Fractional Months → its own fallback key
+  {
+    BenefitNum: 11,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: "6.5",
+    QuantityQualifier: "Months",
+    CoverageLevel: "None",
+  },
+  // Zero quantity with a qualifier → generic branch, still kept
+  {
+    BenefitNum: 12,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: 0,
+    TimePeriod: 1,
+    QuantityQualifier: "Years",
+    CoverageLevel: "None",
+  },
+  // Malformed discriminator — must not fabricate Years1; kept on its amount
+  {
+    BenefitNum: 13,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: true,
+    MonetaryAmt: "75",
+    QuantityQualifier: "Years",
+    CoverageLevel: "None",
+  },
+  // Limitations carrying a code group — code_group_num forwarded, desc null
+  {
+    BenefitNum: 14,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 3,
+    CovCatNum: 2,
+    Quantity: "2",
+    TimePeriod: 2,
+    QuantityQualifier: "NumberOfServices",
+    CodeGroupNum: 5,
+    CoverageLevel: "None",
+  },
+  // String CoPayment — the spelling OD's REST API uses
+  {
+    BenefitNum: 15,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: "CoPayment",
+    CovCatNum: 2,
+    MonetaryAmt: "25",
+    CoverageLevel: "Individual",
+  },
+  // CoPayment with an unusable amount → dropped with its own reason
+  {
+    BenefitNum: 16,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: "CoPayment",
+    CovCatNum: 2,
+    MonetaryAmt: "n/a",
+    CoverageLevel: "Individual",
+  },
+  // Numeric BenefitType 4 — deliberately NOT reclassified; stays "Other"
+  {
+    BenefitNum: 17,
+    PlanNum: 9001,
+    PatPlanNum: 0,
+    BenefitType: 4,
+    CovCatNum: 2,
+    MonetaryAmt: "25",
+    CoverageLevel: "Individual",
+  },
 ];
 
 console.log(
@@ -354,11 +494,62 @@ test("Unmapped BenefitType=99 preserved as Other (not dropped)", () => {
     mapperResult._fallback_reasons["type_99_unmapped_fallback"],
     1,
   );
-  assert.strictEqual(mapperResult._dropped, 0);
+  // The batch now contains a deliberately malformed CoPayment, so _dropped is
+  // no longer 0 overall. What must hold is that the fallback row contributed
+  // nothing to it, and that the drop accounting stays exhaustive.
   assert.strictEqual(
     mapperResult._dropped_reasons["type_99_unmapped"],
     undefined,
   );
+  const droppedSum = Object.values(mapperResult._dropped_reasons).reduce(
+    (a, b) => a + b,
+    0,
+  );
+  assert.strictEqual(droppedSum, mapperResult._dropped);
+  assert.strictEqual(mapperResult._dropped, 1); // the malformed CoPayment only
+});
+
+test("every qualifier branch is driven through the reference parity gate", () => {
+  const byNum = (n) => mapperResult.find((r) => r.benefit_num === n);
+  assert.strictEqual(byNum(7).period, "CalendarYear"); // NumberOfServices
+  assert.strictEqual(byNum(7).quantity, 2);
+  assert.strictEqual(byNum(8).period, "Years5"); // integral Years
+  assert.strictEqual(byNum(8).quantity, 1);
+  assert.strictEqual(byNum(9).period, "Months6"); // integral Months
+  assert.strictEqual(byNum(10).period, "None"); // fractional Years
+  assert.strictEqual(byNum(10).quantity, 1.5);
+  assert.strictEqual(byNum(11).period, "None"); // fractional Months
+  assert.strictEqual(byNum(12).period, "ServiceYear"); // zero qty → generic
+  assert.strictEqual(byNum(13).quantity, undefined); // malformed discriminator
+  assert.strictEqual(byNum(13).amount_cents, 7500);
+  assert.deepStrictEqual(mapperResult._fallback_reasons, {
+    type_99_unmapped_fallback: 1,
+    limitations_decimal_years_qty: 1,
+    limitations_decimal_months_qty: 1,
+    type_4_unmapped_fallback: 1,
+  });
+});
+
+test("code_group_num forwarded from the row; desc stays a stable null", () => {
+  const row = mapperResult.find((r) => r.benefit_num === 14);
+  assert.strictEqual(row.code_group_num, 5);
+  assert.strictEqual(row.code_group_desc, null);
+  const noGroup = mapperResult.find((r) => r.benefit_num === 7);
+  assert.strictEqual(noGroup.code_group_num, null);
+});
+
+test("string CoPayment is typed and parsed; numeric 4 stays Other", () => {
+  const copay = mapperResult.find((r) => r.benefit_num === 15);
+  assert.strictEqual(copay.type, "CoPayment");
+  assert.strictEqual(copay.amount_cents, 2500);
+  assert.strictEqual(
+    mapperResult.find((r) => r.benefit_num === 16),
+    undefined, // malformed amount → dropped
+  );
+  assert.strictEqual(mapperResult._dropped_reasons.copayment_invalid_amount, 1);
+  const numeric4 = mapperResult.find((r) => r.benefit_num === 17);
+  assert.strictEqual(numeric4.type, "Other");
+  assert.strictEqual(numeric4.amount_cents, undefined);
 });
 
 // --- Additive fields present in mapper output ---

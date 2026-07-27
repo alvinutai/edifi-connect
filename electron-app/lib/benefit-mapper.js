@@ -19,6 +19,9 @@ const BEN_TYPE = {
   Deductible: "Deductible",
   Limitations: "Limitations",
   ActiveCoverage: "CoInsurance",
+  // String spelling only — see the comment on the identical map in main.js.
+  // The numeric enum is unsettled and is deliberately left alone.
+  CoPayment: "CoPayment",
 };
 
 const COV_LEVEL = {
@@ -263,6 +266,12 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
           typeof procCodeMap[code_num] === "string" &&
           procCodeMap[code_num]) ||
         null,
+      // B-014 §2.A shared fields — forwarded from the row, never fetched.
+      code_group_num: Number(b.CodeGroupNum) || null,
+      code_group_desc:
+        typeof b.CodeGroupDesc === "string" && b.CodeGroupDesc
+          ? b.CodeGroupDesc
+          : null,
     };
 
     if (type === "CoInsurance") {
@@ -270,6 +279,10 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
     } else if (type === "Deductible") {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
+    } else if (type === "CoPayment") {
+      const copayCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents =
+        copayCents != null ? Math.round(copayCents * 100) : null;
     } else if (type === "Limitations") {
       // B-014 §2.B — qualifier-aware period synthesis. Kept byte-identical in
       // behavior to the inline copy in main.js; the cross-implementation
@@ -327,6 +340,12 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
       if (b.amount_cents != null) return true;
       dropped_reasons.deductible_invalid_amount =
         (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "CoPayment") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.copayment_invalid_amount =
+        (dropped_reasons.copayment_invalid_amount || 0) + 1;
       return false;
     }
     if (b.type === "Limitations") {

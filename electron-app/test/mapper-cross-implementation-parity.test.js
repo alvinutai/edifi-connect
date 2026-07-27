@@ -78,6 +78,39 @@ const SAMPLES = [
   row(3, { BenefitNum: 10, Quantity: null, MonetaryAmt: "0" }), // Limitations MonetaryAmt=0 alone preserved
   row(3, { BenefitNum: 11, Quantity: "garbage", MonetaryAmt: null }), // Limitations malformed Quantity dropped
   row(99, { BenefitNum: 12, Percent: "100" }), // unmapped BenefitType → Other
+  // ── B-014 §2.B qualifier branches — every one crosses the main↔lib gate ──
+  row(3, {
+    BenefitNum: 13,
+    Quantity: "2",
+    TimePeriod: 2,
+    QuantityQualifier: "NumberOfServices",
+  }), // count + window
+  row(3, {
+    BenefitNum: 14,
+    Quantity: "3",
+    TimePeriod: 999,
+    QuantityQualifier: "NumberOfServices",
+  }), // unknown TimePeriod → CalendarYear default
+  row(3, { BenefitNum: 15, Quantity: 5, QuantityQualifier: "Years" }), // integral Years
+  row(3, { BenefitNum: 16, Quantity: "6", QuantityQualifier: "Months" }), // integral Months
+  row(3, { BenefitNum: 17, Quantity: "1.5", QuantityQualifier: "Years" }), // fractional Years
+  row(3, { BenefitNum: 18, Quantity: "6.5", QuantityQualifier: "Months" }), // fractional Months
+  row(3, {
+    BenefitNum: 19,
+    Quantity: 0,
+    TimePeriod: 1,
+    QuantityQualifier: "Years",
+  }), // zero → generic branch
+  row(3, {
+    BenefitNum: 21,
+    Quantity: true,
+    MonetaryAmt: "75",
+    QuantityQualifier: "Years",
+  }), // malformed discriminator, kept on amount
+  row(3, { BenefitNum: 22, Quantity: "1", TimePeriod: 2, CodeGroupNum: 5 }), // code group forwarded
+  row("CoPayment", { BenefitNum: 23, MonetaryAmt: "25" }), // string CoPayment
+  row("CoPayment", { BenefitNum: 24, MonetaryAmt: "n/a" }), // malformed copay → dropped
+  row(4, { BenefitNum: 25, MonetaryAmt: "25" }), // numeric 4 stays Other
 ];
 
 const inlineResult = mapOdApiBenefits(SAMPLES);
@@ -134,6 +167,56 @@ const libProcResult = mapBenefits(procRow, catMap, procCodeMap);
 test("populated category map + proc-code cache: entries match between implementations", () => {
   assert.deepStrictEqual(libProcResult[0], inlineProcResult[0]);
   assert.strictEqual(inlineProcResult[0].proc_code, "D1110");
+});
+
+// Both implementations must agree on the diagnostic maps too, not just rows —
+// a drift that only shows up in the counters would otherwise pass.
+test("both implementations agree on every qualifier-branch outcome", () => {
+  const byNum = (res, n) => res.find((r) => r.benefit_num === n);
+  for (const n of [13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25]) {
+    assert.deepStrictEqual(
+      byNum(libResult, n),
+      byNum(inlineResult, n),
+      `benefit_num=${n} diverged between main.js and lib`,
+    );
+  }
+  assert.strictEqual(byNum(inlineResult, 13).period, "CalendarYear");
+  assert.strictEqual(byNum(inlineResult, 14).period, "CalendarYear");
+  assert.strictEqual(byNum(inlineResult, 15).period, "Years5");
+  assert.strictEqual(byNum(inlineResult, 16).period, "Months6");
+  assert.strictEqual(byNum(inlineResult, 17).period, "None");
+  assert.strictEqual(byNum(inlineResult, 19).period, "ServiceYear");
+  assert.strictEqual(byNum(inlineResult, 21).quantity, undefined);
+  assert.strictEqual(byNum(inlineResult, 22).code_group_num, 5);
+  assert.strictEqual(byNum(inlineResult, 23).type, "CoPayment");
+  assert.strictEqual(byNum(inlineResult, 23).amount_cents, 2500);
+  assert.strictEqual(byNum(inlineResult, 25).type, "Other");
+  assert.strictEqual(byNum(inlineResult, 24), undefined); // dropped
+});
+
+test("diagnostic maps match exactly across implementations, with both keys populated", () => {
+  assert.deepStrictEqual(
+    inlineResult._fallback_reasons,
+    libResult._fallback_reasons,
+  );
+  assert.deepStrictEqual(
+    inlineResult._dropped_reasons,
+    libResult._dropped_reasons,
+  );
+  assert.strictEqual(
+    inlineResult._fallback_reasons.limitations_decimal_years_qty,
+    1,
+  );
+  assert.strictEqual(
+    inlineResult._fallback_reasons.limitations_decimal_months_qty,
+    1,
+  );
+  assert.strictEqual(inlineResult._dropped_reasons.copayment_invalid_amount, 1);
+  const droppedSum = Object.values(inlineResult._dropped_reasons).reduce(
+    (a, b) => a + b,
+    0,
+  );
+  assert.strictEqual(droppedSum, inlineResult._dropped);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

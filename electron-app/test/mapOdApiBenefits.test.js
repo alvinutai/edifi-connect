@@ -307,18 +307,81 @@ test("decimal Months quantity gets its own fallback reason key", () => {
   );
 });
 
-test("CodeGroup fields remain absent — 5a35003's /codegroups fetch is still excluded", () => {
+// --- 5c. Resolved code-group contract (Codex ruling 2) ---
+// CodeGroupNum is already on the /benefits row (lib/od-plan-probe.js:27), so it
+// is forwarded with no I/O. The description is pass-through only: null when the
+// row does not carry one, never resolved by a /codegroups fetch.
+
+test("code_group_num is forwarded from the row", () => {
   const result = mapOdApiBenefits([
+    row(3, { Quantity: "2", TimePeriod: 2, CodeGroupNum: 5 }),
+  ]);
+  assert.strictEqual(result[0].code_group_num, 5);
+});
+
+test("code_group_num is a stable null when the row carries none", () => {
+  const result = mapOdApiBenefits([row(3, { Quantity: "2", TimePeriod: 2 })]);
+  assert.strictEqual(result[0].code_group_num, null);
+  assert.strictEqual(result[0].code_group_desc, null);
+});
+
+test("code_group_desc stays null on the REST path, and passes through when supplied", () => {
+  const rest = mapOdApiBenefits([
+    row(3, { Quantity: "2", TimePeriod: 2, CodeGroupNum: 5 }),
+  ]);
+  assert.strictEqual(rest[0].code_group_desc, null); // no fetch, no fabrication
+
+  const supplied = mapOdApiBenefits([
     row(3, {
       Quantity: "2",
       TimePeriod: 2,
-      QuantityQualifier: "Years",
       CodeGroupNum: 5,
       CodeGroupDesc: "BW",
     }),
   ]);
-  assert.strictEqual(result[0].code_group_num, undefined);
-  assert.strictEqual(result[0].code_group_desc, undefined);
+  assert.strictEqual(supplied[0].code_group_desc, "BW");
+});
+
+test("code-group fields ride the shared base shape, so an Other row carries them too", () => {
+  const result = mapOdApiBenefits([row(99, { CodeGroupNum: 7 })]);
+  assert.strictEqual(result[0].type, "Other");
+  assert.strictEqual(result[0].code_group_num, 7);
+  assert.strictEqual(result[0].code_group_desc, null);
+});
+
+// --- 5d. CoPayment — evidence-bounded to the string spelling ---
+// Evidence: EDIFI-EOS/CHANGELOG.md:307 — "OpenDental REST labels copays
+// `CoPayment`; the desktop agent mapOdApiBenefits string map has no entry →
+// drops them before they leave the office. Backend now accepts them."
+
+test("string CoPayment maps to type CoPayment with a parsed amount", () => {
+  const result = mapOdApiBenefits([row("CoPayment", { MonetaryAmt: "25" })]);
+  assert.strictEqual(result[0].type, "CoPayment");
+  assert.strictEqual(result[0].amount_cents, 2500);
+  assert.deepStrictEqual(result._fallback_reasons, {}); // a known type, not a fallback
+});
+
+test("CoPayment amount goes through the same non-negative seam", () => {
+  const zero = mapOdApiBenefits([row("CoPayment", { MonetaryAmt: "0" })]);
+  assert.strictEqual(zero[0].amount_cents, 0); // a real $0 copay survives
+
+  const negative = mapOdApiBenefits([row("CoPayment", { MonetaryAmt: "-5" })]);
+  assert.strictEqual(negative.length, 0);
+  assert.strictEqual(negative._dropped_reasons.copayment_invalid_amount, 1);
+});
+
+test("malformed CoPayment amount is dropped with its own reason, never $0", () => {
+  const result = mapOdApiBenefits([row("CoPayment", { MonetaryAmt: "n/a" })]);
+  assert.strictEqual(result.length, 0);
+  assert.strictEqual(result._dropped_reasons.copayment_invalid_amount, 1);
+  assert.strictEqual(result._dropped, 1);
+});
+
+test("numeric BenefitType 4 is NOT reclassified — still the Other fallback", () => {
+  const result = mapOdApiBenefits([row(4, { MonetaryAmt: "25" })]);
+  assert.strictEqual(result[0].type, "Other");
+  assert.strictEqual(result[0].amount_cents, undefined);
+  assert.strictEqual(result._fallback_reasons.type_4_unmapped_fallback, 1);
 });
 
 // --- 6. Two-counter invariant ---

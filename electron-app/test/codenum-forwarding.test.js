@@ -59,7 +59,11 @@ test("no procCodeMap at all (cold cache): push continues, fields null-safe", () 
 });
 
 test("CodeNum=0 (category-attached row) → both fields null", () => {
-  const [e] = mapBenefits([coins({ CodeNum: 0, CovCatNum: 2 })], null, PROC_MAP);
+  const [e] = mapBenefits(
+    [coins({ CodeNum: 0, CovCatNum: 2 })],
+    null,
+    PROC_MAP,
+  );
   assert.strictEqual(e.code_num, null);
   assert.strictEqual(e.proc_code, null);
 });
@@ -129,10 +133,15 @@ test("existing fields unchanged: additive contract holds", () => {
 
 test("exact key set pinned for a mapped CoInsurance entry (additive contract, 6D-1B)", () => {
   const [e] = mapBenefits([coins({ CodeNum: 87 })], null, PROC_MAP);
+  // B-014 fix cycle 1: code_group_num/code_group_desc joined the shared base
+  // shape (forwarded from the row, never fetched). Additive, same as 6D-1's
+  // code_num/proc_code before them.
   assert.deepStrictEqual(Object.keys(e).sort(), [
     "benefit_num",
     "category",
     "category_source",
+    "code_group_desc",
+    "code_group_num",
     "code_num",
     "cov_cat_num",
     "coverage_level",

@@ -4191,6 +4191,14 @@ function mapOdApiBenefits(rawBenefits) {
     Deductible: "Deductible",
     Limitations: "Limitations",
     ActiveCoverage: "CoInsurance", // treat active coverage as CoInsurance category
+    // OpenDental's REST API labels copays "CoPayment" (CHANGELOG.md:307,
+    // 2026-04-20 — the backend's CoPayment persistence branch was built for
+    // this string and has been dead ever since because the agent never emitted
+    // it). String spelling ONLY: the numeric BenefitType enum is NOT settled —
+    // od-mysql.js maps 4 → "Other", a same-day note suspected 3 → CoPayment,
+    // and no authoritative OD enum has been captured. A numeric guess here
+    // would silently retype real rows, so numerics keep their current meaning.
+    CoPayment: "CoPayment",
   };
   const COV_LEVEL = {
     0: "None",
@@ -4278,12 +4286,28 @@ function mapOdApiBenefits(rawBenefits) {
           typeof odProcCodeCache[code_num] === "string" &&
           odProcCodeCache[code_num]) ||
         null,
+      // B-014 §2.A shared fields. CodeGroupNum is already on the /benefits row
+      // (see lib/od-plan-probe.js:27) so forwarding it costs no I/O; without it
+      // a group-only frequency row is unmatchable downstream. The description
+      // is pass-through only — null on the REST path, populated when a caller
+      // already has it. Resolving it would need /codegroups, which stays out.
+      code_group_num: Number(b.CodeGroupNum) || null,
+      code_group_desc:
+        typeof b.CodeGroupDesc === "string" && b.CodeGroupDesc
+          ? b.CodeGroupDesc
+          : null,
     };
     if (type === "CoInsurance") {
       entry.percent = toNonNegativeFiniteOrNull(b.Percent);
     } else if (type === "Deductible") {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
+    } else if (type === "CoPayment") {
+      // Same money seam as Deductible — the backend's copay branch keys on
+      // amount_cents, so a malformed amount must read as absent, not as $0.
+      const copayCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
+      entry.amount_cents =
+        copayCents != null ? Math.round(copayCents * 100) : null;
     } else if (type === "Limitations") {
       // Limitations cover both frequency rules and monetary caps (annual max,
       // per-visit limits). B-014 §2.B: the qualifier decides how Quantity is
@@ -4352,6 +4376,12 @@ function mapOdApiBenefits(rawBenefits) {
       if (b.amount_cents != null) return true;
       dropped_reasons.deductible_invalid_amount =
         (dropped_reasons.deductible_invalid_amount || 0) + 1;
+      return false;
+    }
+    if (b.type === "CoPayment") {
+      if (b.amount_cents != null) return true;
+      dropped_reasons.copayment_invalid_amount =
+        (dropped_reasons.copayment_invalid_amount || 0) + 1;
       return false;
     }
     if (b.type === "Limitations") {
