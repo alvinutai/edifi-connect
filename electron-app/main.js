@@ -16,6 +16,7 @@ const { WebSocket, WebSocketServer } = require("ws");
 const { detectOpenDental } = require("./od-detect");
 const {
   isAvailable: isMysqlAvailable,
+  recheckAvailability: recheckMysqlAvailability,
   getBenefitsForPatient,
   getPatNumByNameDOB,
   getAppointmentsForDate,
@@ -885,22 +886,13 @@ async function handleSyncOdNow(commandId, payload) {
       );
     }
 
-    const selection = selectSyncPath({
-      mysqlOk,
-      hasRestConfig: Boolean(config.od_api_url),
-    });
-    logSyncPath(selection, "sync_od_now");
-    if (selection.path === "mysql") {
-      await syncODMySql(syncDate);
-    } else {
-      await syncODData(syncDate);
-    }
+    const selection = await runSelectedSync(syncDate, "sync_od_now");
 
     od_sync_status.last_success_at = new Date().toISOString();
     od_sync_status.last_error = null;
 
     sendCommandResult(commandId, "SYNC_OD_NOW", "COMPLETED", {
-      sync_method: mysqlOk ? "od_mysql" : "od_rest_api",
+      sync_method: SYNC_METHOD_BY_PATH[selection.path],
       completed_at: od_sync_status.last_success_at,
       last_auth_error: od_sync_status.last_auth_error ?? null,
       diagnostic: od_sync_status.last_diagnostic ?? null,
@@ -3639,21 +3631,33 @@ function connectTunnel() {
     // REST as the fallback. Previously this branch preferred REST whenever
     // od_api_url was set, so a MySQL-capable office still synced over the
     // legacy path — and never received a board field.
-    (async () => {
-      const mysqlOk = await isMysqlAvailable().catch(() => false);
-      const selection = selectSyncPath({
-        mysqlOk,
-        hasRestConfig: Boolean(config.od_api_url),
-      });
-      logSyncPath(selection, "startup_interval");
-      const run = selection.path === "mysql" ? syncODMySql : syncODData;
-      run();
-      if (odSyncInterval) clearInterval(odSyncInterval);
-      odSyncInterval = setInterval(run, 15 * 60 * 1000);
-    })().catch((e) => log(`[OD Sync] path selection failed: ${e.message}`));
+    //
+    // Selection happens INSIDE each run (F3). It used to be made once and the
+    // chosen function reused for every tick, so a MySQL failure after startup
+    // never fell back and a recovery was never picked up.
+    //
+    // The claimprocs block below gates on `odSyncInterval`, and it used to read
+    // that variable BEFORE the old async selector had assigned it — so on a
+    // first connect the gate was false and on a reconnect it was the previous
+    // interval id. Scheduling synchronously here would silently change that.
+    // The pre-existing value is captured so claimprocs keeps the exact behavior
+    // it has today; the gate's first-connect quirk is recorded, not fixed here.
+    const hadOdSyncInterval = Boolean(odSyncInterval);
+    if (odSyncInterval) clearInterval(odSyncInterval);
+    runSelectedSync(null, "startup").catch((e) =>
+      log(`[OD Sync] startup sync failed: ${e.message}`),
+    );
+    odSyncInterval = setInterval(
+      () => {
+        runSelectedSync(null, "scheduled").catch((e) =>
+          log(`[OD Sync] scheduled sync failed: ${e.message}`),
+        );
+      },
+      15 * 60 * 1000,
+    );
     // Auto-run claimprocs + fee schedule on connect (after 60s to let initial OD sync settle)
     // then every 24h — no manual permission needed, just needs CONNECT_REMOTE_OD_SYNC_ENABLED.
-    if (odSyncInterval) {
+    if (hadOdSyncInterval) {
       setTimeout(() => {
         const today = new Date().toISOString().split("T")[0];
         autoRunClaimprocsAndFees(today);
@@ -4227,6 +4231,47 @@ function logSyncPath(selection, context) {
     `[OD Sync] sync_path=${selection.path} reason=${selection.reason} context=${context}`,
   );
 }
+
+/**
+ * The ONE place a sync run turns a selection into an action (F3).
+ *
+ * Three-way, and it means it: `none` runs no sync at all. Treating `none` as
+ * REST is what made the "neither is configured" case silently call the legacy
+ * path — the selector said one thing and the branch did another.
+ *
+ * Availability is re-evaluated on EVERY run, not captured once at startup.
+ * `isMysqlAvailable()` caches a healthy result for the process lifetime, so a
+ * database that dies after the first probe would otherwise keep the agent on
+ * MySQL forever with no fallback, and one that recovers would stay unused until
+ * a restart. `recheckMysqlAvailability()` asks the live pool each time, so a
+ * scheduled run fails over and recovers on its own.
+ *
+ * Returns the selection so the caller reports the path it actually took rather
+ * than re-deriving it from a stale boolean.
+ */
+async function runSelectedSync(syncDate, context) {
+  const mysqlOk = await recheckMysqlAvailability().catch(() => false);
+  const selection = selectSyncPath({
+    mysqlOk,
+    hasRestConfig: Boolean(config.od_api_url),
+  });
+  logSyncPath(selection, context);
+  if (selection.path === "mysql") {
+    await syncODMySql(syncDate);
+  } else if (selection.path === "rest") {
+    await syncODData(syncDate);
+  }
+  // "none": nothing is configured to sync from. logSyncPath already recorded
+  // the path and the reason; no sync method is invoked.
+  return selection;
+}
+
+/** The sync_method a COMMAND_RESULT reports, from the path actually taken. */
+const SYNC_METHOD_BY_PATH = {
+  mysql: "od_mysql",
+  rest: "od_rest_api",
+  none: "none",
+};
 
 /**
  * AGENT-EXT — OD stores a patient balance in dollars; the backend's appointment

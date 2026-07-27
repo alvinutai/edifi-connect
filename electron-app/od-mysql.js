@@ -79,6 +79,43 @@ const TIME_PERIOD = {
 // OD CoverageLevel enum — note: Family = 3 (not 2)
 const COVERAGE_LEVEL = { 0: "None", 1: "Individual", 3: "Family" };
 
+// ─── OD wall-clock date/time on the wire (F1) ─────────────────────────────────
+//
+// Open Dental stores DATE/DATETIME with no zone: the value IS the clock on the
+// office wall. mysql2 inflates those columns into JavaScript Date objects bound
+// to the CONNECTION's timezone, and JSON.stringify then serializes that Date as
+// a UTC ISO string. The backend correctly treats an OD value as office-local
+// wall time, so it applies the office offset to an already-shifted instant and
+// the value moves twice: a Denver 09:15 arrival is stored as 21:15Z and the
+// card's waiting timer lies.
+//
+// Formatting in SQL keeps the value a wall-clock string from the driver onward,
+// so exactly one conversion happens (the backend's odDateTimeOrNull with the
+// office timezone).
+//
+// WHY NOT `dateStrings` ON THE POOL: mysql2's dateStrings option is scoped by
+// TYPE (`true`, or a list like ['DATE','DATETIME','TIMESTAMP']) and applies to
+// the whole connection — it is not column-scoped. Setting it would change the
+// return type of every other query on this pool (benefits, covcat, codegroup,
+// status definitions, appointment types, information_schema probes). Formatting
+// per column confines the change to the two statements that put a date on the
+// wire, which is the blast radius this fix is allowed to have.
+//
+// Zero dates: OD's `0001-01-01 00:00:00` sentinel is a valid date, so
+// DATE_FORMAT returns it verbatim and the backend's existing sentinel check
+// rejects it. A true `0000-00-00` returns NULL, which the backend reads as
+// absent (COALESCE keeps the stored value) — also correct.
+const OD_DATETIME_SQL_FORMAT = "%Y-%m-%d %H:%i:%s";
+const OD_DATE_SQL_FORMAT = "%Y-%m-%d";
+
+function odWallDateTime(column, alias) {
+  return `DATE_FORMAT(${column}, '${OD_DATETIME_SQL_FORMAT}') AS ${alias}`;
+}
+
+function odWallDate(column, alias) {
+  return `DATE_FORMAT(${column}, '${OD_DATE_SQL_FORMAT}') AS ${alias}`;
+}
+
 let pool = null;
 let configCache = null;
 let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
@@ -306,6 +343,53 @@ async function isAvailable() {
   const p = await getPool();
   available = p !== null;
   return available;
+}
+
+/**
+ * Availability for a NEW sync run (F3).
+ *
+ * `isAvailable()` caches a TRUE result for the life of the process — the 5-minute
+ * reset above only clears a FALSE. So an office whose MySQL goes away mid-day
+ * keeps reporting healthy forever and the sync path never falls back to the
+ * configured REST service. Path selection needs a live answer, so it asks the
+ * pool the same `SELECT 1` question `getPool()` asks when it builds one.
+ *
+ * On failure the pool and capability caches are discarded and `available` goes
+ * back to unknown (not false), so the next call retries the connection
+ * strategies and a recovered database is picked up on the following cycle
+ * rather than waiting for the 5-minute timer.
+ *
+ * Connection strategy, credentials, config paths and pool construction are
+ * untouched: this only asks the pool that already exists whether it still
+ * answers. Every existing `isAvailable()` caller keeps its current behavior.
+ */
+async function recheckAvailability() {
+  const p = await getPool();
+  if (!p) {
+    available = false;
+    return false;
+  }
+  try {
+    const conn = await p.getConnection();
+    try {
+      await conn.query("SELECT 1");
+    } finally {
+      conn.release();
+    }
+    available = true;
+    return true;
+  } catch (e) {
+    logger(
+      `MySQL liveness check failed (${e.code || e.message}) — reconnecting next cycle`,
+    );
+    try {
+      await p.end();
+    } catch {}
+    pool = null;
+    available = null;
+    resetCapabilityCaches();
+    return false;
+  }
 }
 
 // ─── CodeGroup Capability Probe ───────────────────────────────────────────────
@@ -708,6 +792,15 @@ const AGENT_EXT_COLUMNS = {
   provider: ["ProvColor"],
 };
 
+// Which AGENT_EXT_COLUMNS entries are OD DATETIME columns and must therefore be
+// formatted to a wall-clock string rather than handed to the driver's date
+// parser. See the odWallDateTime comment for why this is done per column.
+const AGENT_EXT_DATETIME_COLUMNS = new Set([
+  "DateTimeArrived",
+  "DateTimeSeated",
+  "DateTimeDismissed",
+]);
+
 /**
  * Which AGENT-EXT columns this Open Dental actually has. One information_schema
  * query, cached per session, same shape as probeAppointmentTypeSupport. A probe
@@ -762,7 +855,11 @@ async function probeAgentExtColumns() {
  */
 function agentExtSelectFragment(cols) {
   const parts = [
-    ...cols.appointment.map((c) => `a.${c}`),
+    ...cols.appointment.map((c) =>
+      AGENT_EXT_DATETIME_COLUMNS.has(c)
+        ? odWallDateTime(`a.${c}`, c)
+        : `a.${c}`,
+    ),
     ...cols.patient.map((c) => `p.${c}`),
     ...cols.provider.map((c) => `prov.${c}`),
   ];
@@ -776,10 +873,10 @@ async function getAppointmentsForDate(date) {
   const extCols = await probeAgentExtColumns();
   try {
     const [rows] = await p.query(
-      `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+      `SELECT a.AptNum, a.PatNum, ${odWallDateTime("a.AptDateTime", "AptDateTime")},
               a.Op, a.Pattern, a.ProvNum, a.ProvHyg, a.AptStatus,
               CHAR_LENGTH(a.Pattern) * 5 AS DurationMin,
-              p.FName, p.LName, p.Birthdate,
+              p.FName, p.LName, ${odWallDate("p.Birthdate", "Birthdate")},
               p.HmPhone, p.WkPhone, p.Email,
               op.OpName, op.Abbrev AS OpAbbrev,
               prov.Abbr AS ProvAbbr,
@@ -1175,7 +1272,11 @@ async function getAppointmentTypesForDate(date) {
 
 module.exports = {
   isAvailable,
+  recheckAvailability,
   readOdConfig,
+  odWallDateTime,
+  odWallDate,
+  AGENT_EXT_DATETIME_COLUMNS,
   getBenefitsForPatient,
   mapMysqlBenefitRow,
   mapMysqlBenefits,

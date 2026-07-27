@@ -98,8 +98,11 @@ test("getAppointmentsForDate splices the probed fragment into its SELECT", () =>
   );
   assert.ok(fn.includes("await probeAgentExtColumns()"));
   assert.ok(fn.includes("${agentExtSelectFragment(extCols)}"));
-  // Base columns still present — this is additive, not a rewrite.
-  assert.ok(fn.includes("a.AptNum, a.PatNum, a.AptDateTime"));
+  // Base columns still present — this is additive, not a rewrite. AptDateTime
+  // now goes through the wall-clock formatter (F1); behavior for the other
+  // base columns is unchanged. Full datetime coverage: mysql-datetime-wire.
+  assert.ok(fn.includes("a.AptNum, a.PatNum,"));
+  assert.ok(fn.includes('odWallDateTime("a.AptDateTime", "AptDateTime")'));
   assert.ok(fn.includes("AS Production"));
 });
 

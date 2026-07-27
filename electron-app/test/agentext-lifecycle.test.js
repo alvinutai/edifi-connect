@@ -44,7 +44,9 @@ Module._load = function (request) {
   return realLoad.apply(this, arguments);
 };
 
-function loadOdMysqlWith(queryImpl) {
+// `connectionImpl` overrides what a borrowed connection does; the default is a
+// healthy `SELECT 1`, which is what every pre-F3 test in this file assumes.
+function loadOdMysqlWith(queryImpl, connectionImpl) {
   const calls = [];
   const fakePool = {
     query: async (sql, params) => {
@@ -52,7 +54,10 @@ function loadOdMysqlWith(queryImpl) {
       return queryImpl(sql, params);
     },
     getConnection: async () => ({
-      query: async () => [[{ ok: 1 }]],
+      query: async () => {
+        if (connectionImpl) return connectionImpl();
+        return [[{ ok: 1 }]];
+      },
       release: () => {},
     }),
     end: async () => {},
@@ -197,6 +202,105 @@ const SCHEMA_B = schemaRows([
     assert.ok(!b.includes("BalTotal"));
   });
 
+  // ── F3: availability must be answerable again, not cached true forever ────
+
+  await test("isAvailable caches a healthy answer — recheck is why failover works", async () => {
+    // Pinning the reason recheckAvailability exists. The 5-minute reset only
+    // clears a FALSE, so once this returns true nothing re-tests it and a
+    // database that dies is never noticed by isAvailable().
+    let connects = 0;
+    const { od } = loadOdMysqlWith(
+      () => [[]],
+      () => {
+        connects++;
+        return [[{ ok: 1 }]];
+      },
+    );
+    await od.isAvailable();
+    const before = connects;
+    await od.isAvailable();
+    assert.strictEqual(connects, before, "isAvailable re-probed unexpectedly");
+  });
+
+  await test("recheckAvailability asks the live pool every time", async () => {
+    let connects = 0;
+    const { od } = loadOdMysqlWith(
+      () => [[]],
+      () => {
+        connects++;
+        return [[{ ok: 1 }]];
+      },
+    );
+    // Build the pool first — getPool()'s own SELECT 1 is not a recheck.
+    await od.isAvailable();
+    const base = connects;
+    await od.recheckAvailability();
+    await od.recheckAvailability();
+    await od.recheckAvailability();
+    assert.strictEqual(connects - base, 3);
+  });
+
+  await test("a database that dies after a healthy start is reported unavailable", async () => {
+    let alive = true;
+    const { od } = loadOdMysqlWith(
+      () => [[]],
+      () => {
+        if (!alive)
+          throw Object.assign(new Error("gone"), { code: "ECONNRESET" });
+        return [[{ ok: 1 }]];
+      },
+    );
+    assert.strictEqual(await od.recheckAvailability(), true);
+    alive = false;
+    assert.strictEqual(await od.recheckAvailability(), false);
+  });
+
+  await test("a recovered database is picked up without a restart", async () => {
+    let alive = true;
+    const { od } = loadOdMysqlWith(
+      () => [[]],
+      () => {
+        if (!alive)
+          throw Object.assign(new Error("gone"), { code: "ECONNRESET" });
+        return [[{ ok: 1 }]];
+      },
+    );
+    await od.recheckAvailability();
+    alive = false;
+    await od.recheckAvailability();
+    alive = true;
+    // Without the reset to "unknown" this would stay false until the 5-minute
+    // timer, and the agent would keep syncing over REST in the meantime.
+    assert.strictEqual(await od.recheckAvailability(), true);
+  });
+
+  await test("a failed liveness check drops the capability caches too", async () => {
+    // The pool is rebuilt after a failure, so capabilities probed against the
+    // old target must not survive — that is the blank-board failure mode.
+    let alive = true;
+    let current = SCHEMA_A;
+    const { od } = loadOdMysqlWith(
+      (sql) => {
+        if (/information_schema\.COLUMNS/.test(sql)) return [current];
+        return [[]];
+      },
+      () => {
+        if (!alive) throw new Error("gone");
+        return [[{ ok: 1 }]];
+      },
+    );
+    const a = await od.probeAgentExtColumns();
+    assert.ok(a.patient.includes("BalTotal"));
+
+    alive = false;
+    await od.recheckAvailability();
+    alive = true;
+    current = SCHEMA_B;
+
+    const b = await od.probeAgentExtColumns();
+    assert.ok(!b.patient.includes("BalTotal"), "stale capability survived");
+  });
+
   // ── F3 / R2: sync-path selection ─────────────────────────────────────────
 
   const mainSrc = fs.readFileSync(
@@ -241,15 +345,18 @@ const SCHEMA_B = schemaRows([
     );
   });
 
-  await test("both selection sites use the shared rule and log one line", () => {
-    // On-demand and startup/interval previously disagreed; pin that they no
-    // longer can.
+  await test("selection and dispatch happen in exactly one place", () => {
+    // F3 rewrote this assertion. It used to require TWO selectSyncPath call
+    // sites, which was the shape of the defect: two branches each deciding for
+    // themselves what to do with the result, and disagreeing. Both sites now
+    // route through runSelectedSync, so there is one selector call, one log
+    // call, and one three-way branch. Runtime behavior — including that `none`
+    // runs nothing — is asserted in sync-path-runtime.test.js.
     const uses = mainSrc.match(/= selectSyncPath\(\{/g) ?? [];
-    assert.strictEqual(uses.length, 2, "expected exactly two call sites");
-    const logs = mainSrc.match(/logSyncPath\(selection, "/g) ?? [];
-    assert.strictEqual(logs.length, 2);
-    assert.ok(mainSrc.includes('logSyncPath(selection, "sync_od_now")'));
-    assert.ok(mainSrc.includes('logSyncPath(selection, "startup_interval")'));
+    assert.strictEqual(uses.length, 1, "expected one selection site");
+    // The call, not the declaration.
+    const logs = mainSrc.match(/logSyncPath\(selection, context\);/g) ?? [];
+    assert.strictEqual(logs.length, 1);
     // The old REST-first branch must be gone.
     assert.ok(
       !/if \(config\.od_api_url\) \{\s*syncODData\(\);/.test(mainSrc),
