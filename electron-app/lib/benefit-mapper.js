@@ -187,8 +187,9 @@ function buildCatMap(covcatRows) {
 // or well-formed numeric strings; rejects null/undefined/booleans/arrays/
 // objects/empty-or-malformed strings/NaN/Infinity by returning null instead
 // of silently coercing to 0/1/NaN. Kept in sync with the identical copy in
-// mapOdApiBenefits() in main.js. Adapted for rc.3: excludes 5a35003's
-// qualifier-aware Years/Months period synthesis (not part of this baseline).
+// mapOdApiBenefits() in main.js. The qualifier-aware Years/Months period
+// synthesis (B-014 §2.B) IS included as of this branch — written fresh against
+// the strict parser, without 5a35003's /codegroups fetch.
 function toFiniteNumberOrNull(raw) {
   if (raw == null) return null;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
@@ -270,8 +271,42 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
+      // B-014 §2.B — qualifier-aware period synthesis. Kept byte-identical in
+      // behavior to the inline copy in main.js; the cross-implementation
+      // parity test diffs both on the same rows.
+      entry.qualifier = b.QuantityQualifier ?? null;
+      const qq = String(b.QuantityQualifier ?? "");
       const qty = toNonNegativeFiniteOrNull(b.Quantity);
-      if (qty != null) {
+      if (qty != null && qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = qty;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Years"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Years${qty}`;
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Months"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Months${qty}`;
+      } else if (
+        qty != null &&
+        qty > 0 &&
+        !Number.isInteger(qty) &&
+        (qq === "Years" || qq === "Months")
+      ) {
+        entry.quantity = qty;
+        entry.period = "None";
+        const key = `limitations_decimal_${qq.toLowerCase()}_qty`;
+        fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
+      } else if (qty != null) {
         entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }

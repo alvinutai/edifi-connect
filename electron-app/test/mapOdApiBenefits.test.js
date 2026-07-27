@@ -7,11 +7,12 @@
  * dependencies (resolveBenefitCategory, the OD cache globals, log) bound to
  * test doubles.
  *
- * This candidate (release/connect-2.4.0-rc.4) deliberately excludes 5a35003
- * (REST CodeGroup frequency metadata / qualifier-aware Years-Months period
- * synthesis) — a suspect in the rc.2 bridge-hold regression. Limitations
- * rows here use raw Quantity + TimePeriod only, no QuantityQualifier
- * interpretation. See EDIFI-EOS\B014-DEPLOY-PACKET-2026-07-09.md.
+ * Branch fix/b014-benefit-row-drops completes packet §2.B: the qualifier-aware
+ * Years/Months period synthesis is implemented here, written fresh against
+ * toNonNegativeFiniteOrNull. 5a35003 itself remains excluded — its /codegroups
+ * fetch is a suspect in the rc.2 bridge-hold regression and is no part of
+ * B-014, so CodeGroup fields are still absent (asserted below).
+ * See EDIFI-EOS\B014-FIX-PACKET-2026-07-09.md §2.B.
  *
  * This is the main entry point registered as `npm test` in package.json.
  * Run: node test/mapOdApiBenefits.test.js (from electron-app/)
@@ -212,20 +213,110 @@ test("Limitations with no valid quantity or amount is dropped with a reason", ()
   assert.strictEqual(result._dropped_reasons.limitations_no_valid_value, 1);
 });
 
-test("rc.3 baseline negative control: QuantityQualifier/CodeGroupNum/CodeGroupDesc on a raw row are silently ignored, not read or forwarded", () => {
+// --- 5b. B-014 §2.B qualifier-aware period synthesis ---
+// Replaces the rc.3 "qualifier is inert" negative control: on this branch the
+// qualifier IS consulted, per the frozen packet. CodeGroup fields stay absent —
+// they belong to 5a35003's /codegroups fetch, which is still excluded.
+
+test("Limitations NumberOfServices → count kept, period from TimePeriod", () => {
   const result = mapOdApiBenefits([
     row(3, {
       Quantity: "2",
       TimePeriod: 2,
-      QuantityQualifier: "Years", // would matter on the wizard-branch/5a35003 baseline; must be inert here
+      QuantityQualifier: "NumberOfServices",
+    }),
+  ]);
+  assert.strictEqual(result[0].quantity, 2);
+  assert.strictEqual(result[0].period, "CalendarYear");
+  assert.strictEqual(result[0].qualifier, "NumberOfServices");
+});
+
+test("Limitations NumberOfServices with unknown TimePeriod defaults to CalendarYear", () => {
+  const result = mapOdApiBenefits([
+    row(3, {
+      Quantity: "1",
+      TimePeriod: 999,
+      QuantityQualifier: "NumberOfServices",
+    }),
+  ]);
+  assert.strictEqual(result[0].period, "CalendarYear");
+});
+
+test("Limitations Years=2 → period Years2, quantity normalized to 1", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: "2", TimePeriod: 2, QuantityQualifier: "Years" }),
+  ]);
+  assert.strictEqual(result[0].quantity, 1);
+  assert.strictEqual(result[0].period, "Years2");
+});
+
+test("Limitations Months=6 → period Months6, quantity normalized to 1", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: 6, QuantityQualifier: "Months" }),
+  ]);
+  assert.strictEqual(result[0].quantity, 1);
+  assert.strictEqual(result[0].period, "Months6");
+});
+
+test("Limitations Quantity=2.0 (integer-valued float) still builds Years2", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: 2.0, QuantityQualifier: "Years" }),
+  ]);
+  assert.strictEqual(result[0].period, "Years2");
+});
+
+// (i) — the discriminator itself goes through the strict parser
+test("Limitations Quantity=true + Years does NOT fabricate {quantity:1, period:'Years1'}", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: true, MonetaryAmt: "50", QuantityQualifier: "Years" }),
+  ]);
+  assert.strictEqual(result.length, 1); // kept on its monetary amount
+  assert.strictEqual(result[0].quantity, undefined);
+  assert.strictEqual(result[0].period, undefined);
+  assert.strictEqual(result[0].amount_cents, 5000);
+});
+
+// (m) + (n) — decimal Years/Months: no malformed label, preserved, counted
+test("Limitations Quantity='1.5' + Years does NOT produce period 'Years1.5'", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: "1.5", QuantityQualifier: "Years" }),
+  ]);
+  assert.strictEqual(result[0].period, "None");
+  assert.notStrictEqual(result[0].period, "Years1.5");
+});
+
+test("decimal Years quantity is preserved and counted in fallback_reason_counts, never dropped", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: "1.5", QuantityQualifier: "Years" }),
+  ]);
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0].quantity, 1.5);
+  assert.strictEqual(result._fallback_reasons.limitations_decimal_years_qty, 1);
+  assert.strictEqual(result._dropped, 0);
+  assert.deepStrictEqual(result._dropped_reasons, {});
+});
+
+test("decimal Months quantity gets its own fallback reason key", () => {
+  const result = mapOdApiBenefits([
+    row(3, { Quantity: "6.5", QuantityQualifier: "Months" }),
+  ]);
+  assert.strictEqual(result[0].period, "None");
+  assert.strictEqual(
+    result._fallback_reasons.limitations_decimal_months_qty,
+    1,
+  );
+});
+
+test("CodeGroup fields remain absent — 5a35003's /codegroups fetch is still excluded", () => {
+  const result = mapOdApiBenefits([
+    row(3, {
+      Quantity: "2",
+      TimePeriod: 2,
+      QuantityQualifier: "Years",
       CodeGroupNum: 5,
       CodeGroupDesc: "BW",
     }),
   ]);
-  assert.strictEqual(result.length, 1);
-  assert.strictEqual(result[0].quantity, 2);
-  assert.strictEqual(result[0].period, "CalendarYear"); // NOT "Years2" — proves qualifier is not consulted
-  assert.strictEqual(result[0].qualifier, undefined);
   assert.strictEqual(result[0].code_group_num, undefined);
   assert.strictEqual(result[0].code_group_desc, undefined);
 });
@@ -260,6 +351,36 @@ test("sum(dropped_reasons) equals true drop count; fallback rows never inflate i
     0,
   );
   assert.strictEqual(fallbackSum, 1); // type_99 only
+});
+
+// --- 7. syncODData surfacing (packet §3(o)) ---
+// Source-level, same technique as the updater-hardening suite: syncODData
+// cannot run outside Electron, so the accumulator wiring is pinned by reading
+// the live source rather than by a mock that could drift from it.
+
+const syncStart = mainSrc.indexOf("async function syncODData(");
+const syncSrc = mainSrc.slice(syncStart, syncStart + 40000);
+
+test("benefitStats initializes fallback_reason_counts alongside dropped_reason_counts", () => {
+  assert.ok(
+    /dropped_reason_counts:\s*\{\}\s*,\s*fallback_reason_counts:\s*\{\}\s*,/.test(
+      syncSrc,
+    ),
+    "fallback_reason_counts not initialized next to dropped_reason_counts",
+  );
+});
+
+test("syncODData aggregates _fallback_reasons the same way it aggregates _dropped_reasons", () => {
+  assert.ok(
+    syncSrc.includes("benefits._fallback_reasons || {}"),
+    "no _fallback_reasons read in syncODData",
+  );
+  assert.ok(
+    /benefitStats\.fallback_reason_counts\[k\]\s*=\s*\(benefitStats\.fallback_reason_counts\[k\]\s*\|\|\s*0\)\s*\+\s*v/.test(
+      syncSrc,
+    ),
+    "fallback accumulator does not mirror the dropped accumulator",
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

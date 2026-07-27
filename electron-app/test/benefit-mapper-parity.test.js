@@ -119,8 +119,40 @@ function inlineMapper(rawBenefits, catMap) {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
+      // B-014 §2.B qualifier-aware period synthesis — mirrors main.js and lib.
+      entry.qualifier = b.QuantityQualifier ?? null;
+      const qq = String(b.QuantityQualifier ?? "");
       const qty = toNonNegativeFiniteOrNull(b.Quantity);
-      if (qty != null) {
+      if (qty != null && qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = qty;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Years"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Years${qty}`;
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Months"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Months${qty}`;
+      } else if (
+        qty != null &&
+        qty > 0 &&
+        !Number.isInteger(qty) &&
+        (qq === "Years" || qq === "Months")
+      ) {
+        entry.quantity = qty;
+        entry.period = "None";
+        const key = `limitations_decimal_${qq.toLowerCase()}_qty`;
+        fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
+      } else if (qty != null) {
         entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }

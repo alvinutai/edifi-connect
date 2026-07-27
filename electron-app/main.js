@@ -4154,11 +4154,11 @@ async function getOdProcCodes() {
 // or well-formed numeric strings; rejects null/undefined/booleans/arrays/
 // objects/empty-or-malformed strings/NaN/Infinity by returning null instead
 // of silently coercing to 0/1/NaN. See EDIFI-EOS\B014-FIX-PACKET-2026-07-09.md
-// for the full defect history and design rationale. Adapted for the rc.3
-// baseline: this candidate deliberately EXCLUDES 5a35003 (REST CodeGroup
-// frequency metadata, a suspect in the rc.2 bridge-hold regression), so this
-// fix carries only the three drop-mechanism corrections, not the qualifier-
-// aware Years/Months period synthesis that 5a35003 introduced.
+// for the full defect history and design rationale. The qualifier-aware
+// Years/Months period synthesis (packet §2.B) is now implemented here too,
+// written fresh against this parser — 5a35003 itself stays excluded, since
+// its /codegroups fetch is a suspect in the rc.2 bridge-hold regression and
+// is no part of B-014.
 // KEEP IN SYNC with the identical copy in lib/benefit-mapper.js.
 function toFiniteNumberOrNull(raw) {
   if (raw == null) return null;
@@ -4285,9 +4285,50 @@ function mapOdApiBenefits(rawBenefits) {
       const dedCents = toNonNegativeFiniteOrNull(b.MonetaryAmt);
       entry.amount_cents = dedCents != null ? Math.round(dedCents * 100) : null;
     } else if (type === "Limitations") {
-      // Limitations cover both frequency rules and monetary caps (annual max, per-visit limits)
+      // Limitations cover both frequency rules and monetary caps (annual max,
+      // per-visit limits). B-014 §2.B: the qualifier decides how Quantity is
+      // read — NumberOfServices is a count per window, Years/Months encode the
+      // interval itself. The DISCRIMINATOR goes through the strict parser too,
+      // not just the assignment: a coerced `Quantity: true` with
+      // QuantityQualifier "Years" must never fabricate {quantity:1,
+      // period:"Years1"}.
+      entry.qualifier = b.QuantityQualifier ?? null;
+      const qq = String(b.QuantityQualifier ?? "");
       const qty = toNonNegativeFiniteOrNull(b.Quantity);
-      if (qty != null) {
+      if (qty != null && qty > 0 && qq === "NumberOfServices") {
+        entry.quantity = qty;
+        entry.period = TIME_PERIOD[b.TimePeriod] || "CalendarYear";
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Years"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Years${qty}`;
+      } else if (
+        qty != null &&
+        Number.isInteger(qty) &&
+        qty > 0 &&
+        qq === "Months"
+      ) {
+        entry.quantity = 1;
+        entry.period = `Months${qty}`;
+      } else if (
+        qty != null &&
+        qty > 0 &&
+        !Number.isInteger(qty) &&
+        (qq === "Years" || qq === "Months")
+      ) {
+        // A decimal Years/Months quantity cannot build a label the TIME_PERIOD
+        // map uses ("Years1.5" is not a period this system understands). The
+        // row is preserved with its real quantity and an honest "None" period,
+        // and the downgrade is counted — never a silent fall-through.
+        entry.quantity = qty;
+        entry.period = "None";
+        const key = `limitations_decimal_${qq.toLowerCase()}_qty`;
+        fallback_reason_counts[key] = (fallback_reason_counts[key] || 0) + 1;
+      } else if (qty != null) {
         entry.quantity = qty;
         entry.period = TIME_PERIOD[b.TimePeriod] || "None";
       }
