@@ -77,6 +77,7 @@ let configCache = null;
 let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
 let codeGroupAvailable = null; // cached CodeGroup capability probe — invalidated on reconnect
 let appointmentTypeAvailable = null; // cached appointmenttype capability probe (session-scoped)
+let agentExtColumns = null; // cached AGENT-EXT column probe (session-scoped)
 let available = null; // null = unknown, true/false = tested
 let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
 let manualConfigOverride = null; // set by SET_MYSQL_CONFIG command — bypasses file scan
@@ -574,10 +575,97 @@ async function buildCovCatMap() {
 
 // ─── Appointments for Date (MySQL — no REST API required) ─────────────────────
 
+// AGENT-EXT board fields, per table. Every one is probed before it enters the
+// SELECT: this is a single statement, so one column that an older Open Dental
+// build does not have would throw and return ZERO appointments — the board
+// would go blank rather than lose one chip. Probing degrades per column.
+const AGENT_EXT_COLUMNS = {
+  appointment: [
+    "Confirmed",
+    "DateTimeArrived",
+    "DateTimeSeated",
+    "DateTimeDismissed",
+    "IsNewPatient",
+    "IsHygiene",
+  ],
+  patient: [
+    "Premed",
+    "MedUrgNote",
+    "Preferred",
+    // Balance source. No in-repo helper names one, and it could not be checked
+    // against Tessina's real OD from here, so both known candidates are probed
+    // and whichever exists is sent (BalTotal preferred — it is OD's own total
+    // patient balance; EstBalance is the estimated-after-insurance figure).
+    // Recorded in the packet result rather than guessed at.
+    "BalTotal",
+    "EstBalance",
+  ],
+  provider: ["ProvColor"],
+};
+
+/**
+ * Which AGENT-EXT columns this Open Dental actually has. One information_schema
+ * query, cached per session, same shape as probeAppointmentTypeSupport. A probe
+ * failure resolves to "none available", which returns the board to exactly the
+ * query it runs today.
+ */
+async function probeAgentExtColumns() {
+  if (agentExtColumns !== null) return agentExtColumns;
+  const p = await getPool();
+  if (!p) return { appointment: [], patient: [], provider: [] };
+  const empty = { appointment: [], patient: [], provider: [] };
+  try {
+    const [rows] = await p.query(
+      `SELECT TABLE_NAME, COLUMN_NAME
+         FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN ('appointment', 'patient', 'provider')`,
+    );
+    const present = new Set(
+      rows.map((r) => `${r.TABLE_NAME}.${r.COLUMN_NAME}`.toLowerCase()),
+    );
+    agentExtColumns = {
+      appointment: AGENT_EXT_COLUMNS.appointment.filter((c) =>
+        present.has(`appointment.${c.toLowerCase()}`),
+      ),
+      patient: AGENT_EXT_COLUMNS.patient.filter((c) =>
+        present.has(`patient.${c.toLowerCase()}`),
+      ),
+      provider: AGENT_EXT_COLUMNS.provider.filter((c) =>
+        present.has(`provider.${c.toLowerCase()}`),
+      ),
+    };
+    logger(
+      `AGENT-EXT column probe: appointment=[${agentExtColumns.appointment}] ` +
+        `patient=[${agentExtColumns.patient}] provider=[${agentExtColumns.provider}]`,
+    );
+    return agentExtColumns;
+  } catch (e) {
+    logger(`AGENT-EXT column probe failed (board unaffected): ${e.message}`);
+    agentExtColumns = empty;
+    return empty;
+  }
+}
+
+/**
+ * SELECT fragment for the probed columns. Names come from AGENT_EXT_COLUMNS —
+ * a fixed in-file allowlist, never from OD data or a command — so this is not
+ * a dynamic-SQL surface.
+ */
+function agentExtSelectFragment(cols) {
+  const parts = [
+    ...cols.appointment.map((c) => `a.${c}`),
+    ...cols.patient.map((c) => `p.${c}`),
+    ...cols.provider.map((c) => `prov.${c}`),
+  ];
+  return parts.length > 0 ? `,\n              ${parts.join(", ")}` : "";
+}
+
 async function getAppointmentsForDate(date) {
   const p = await getPool();
   if (!p) return [];
   const targetDate = date || new Date().toISOString().slice(0, 10);
+  const extCols = await probeAgentExtColumns();
   try {
     const [rows] = await p.query(
       `SELECT a.AptNum, a.PatNum, a.AptDateTime,
@@ -591,7 +679,7 @@ async function getAppointmentsForDate(date) {
               (SELECT ROUND(SUM(pl.ProcFee), 2)
                  FROM procedurelog pl
                 WHERE pl.AptNum = a.AptNum
-                  AND pl.ProcStatus IN (1, 2)) AS Production
+                  AND pl.ProcStatus IN (1, 2)) AS Production${agentExtSelectFragment(extCols)}
        FROM appointment a
        LEFT JOIN patient   p    ON p.PatNum        = a.PatNum
        LEFT JOIN operatory op   ON op.OperatoryNum = a.Op
@@ -906,6 +994,48 @@ async function getOperatories() {
 // untouched. Hidden types are NOT filtered out: an appointment assigned a
 // since-hidden type still renders with that type's color in OD.
 
+/**
+ * Open Dental's confirmation-status palette — `definition` Category 2, the
+ * office's own list behind `appointment.Confirmed` (a DefNum FK).
+ *
+ * Probe-guarded like getAppointmentTypesForDate: a schema without the table or
+ * the columns returns [] and the board keeps its current status colors. Colors
+ * are the raw signed ARGB integers OD stores; the backend converts them once,
+ * at ingest, so this stays a dumb read.
+ */
+async function getStatusDefinitions() {
+  const p = await getPool();
+  if (!p) return [];
+  try {
+    const [[tableRow]] = await p.query(
+      `SELECT COUNT(*) AS cnt
+         FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'definition'`,
+    );
+    if (Number(tableRow?.cnt || 0) === 0) return [];
+
+    const [rows] = await p.query(
+      `SELECT d.DefNum, d.ItemName, d.ItemColor, d.ItemOrder, d.IsHidden
+         FROM definition d
+        WHERE d.Category = 2
+        ORDER BY d.ItemOrder`,
+    );
+    return rows.map((r) => ({
+      def_num: Number(r.DefNum),
+      // Hidden entries are still returned: an appointment can carry a Confirmed
+      // value the office later hid, and dropping it would leave that status
+      // unlabeled on the card.
+      is_hidden: Number(r.IsHidden || 0) === 1,
+      status_name: String(r.ItemName || "").trim() || null,
+      status_color: r.ItemColor != null ? Number(r.ItemColor) : null,
+    }));
+  } catch (e) {
+    logger(`getStatusDefinitions error: ${e.message}`);
+    return [];
+  }
+}
+
 async function getAppointmentTypesForDate(date) {
   if (!(await probeAppointmentTypeSupport())) return [];
   const p = await getPool();
@@ -942,6 +1072,10 @@ module.exports = {
   mapMysqlBenefitRow,
   probeCodeGroupSupport,
   probeAppointmentTypeSupport,
+  probeAgentExtColumns,
+  agentExtSelectFragment,
+  getStatusDefinitions,
+  AGENT_EXT_COLUMNS,
   getPatNumByNameDOB,
   getAppointmentsForDate,
   getAppointmentsToday,

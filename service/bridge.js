@@ -1,4 +1,15 @@
 ﻿// EDiFi Connect Bridge Service — headless Node.js, no Electron
+//
+// DEAD CODE since 2026-06-06. This file is NOT packaged: the electron-builder
+// `build.files` whitelist excludes it, so no installed agent has ever run it.
+// The live OD_DATA_PUSH sender is electron-app/main.js, and it is the only one
+// carrying the B1/B1b board work and the AGENT-EXT fields — this file's
+// hand-built frame silently omits them.
+//
+// Deliberately NOT extended. Adding fields here would create a second,
+// divergent contract that ships to nobody. See PKT-FINDINGB-SENDER-FORENSIC.md
+// for the evidence and PKT-AGENTEXT-P4 for the ruling. Formal retirement is a
+// separate decision; until then, treat this file as reference only.
 const path = require("path");
 const fs = require("fs");
 const express = require("express");

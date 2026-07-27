@@ -22,6 +22,7 @@ const {
   getAppointmentsToday,
   getOperatories,
   getAppointmentTypesForDate,
+  getStatusDefinitions,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
   writeOdBenefits,
@@ -4152,6 +4153,21 @@ async function getOdProcCodes() {
   return {};
 }
 
+/**
+ * AGENT-EXT — OD stores a patient balance in dollars; the backend's appointment
+ * ingest reads cents. This is the one conversion the agent does, and only
+ * because the unit would otherwise be ambiguous on the wire.
+ *
+ * A real 0 balance survives (the patient owes nothing — that is a fact the card
+ * should be able to show); anything non-numeric becomes null so the backend's
+ * COALESCE keeps whatever it already had.
+ */
+function odBalanceToCents(raw) {
+  const n = typeof raw === "string" ? Number(raw.trim()) : raw;
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  return Math.round(n * 100);
+}
+
 // B-014 fix (2026-07-09) — shared strict numeric parser. Accepts real numbers
 // or well-formed numeric strings; rejects null/undefined/booleans/arrays/
 // objects/empty-or-malformed strings/NaN/Infinity by returning null instead
@@ -4780,6 +4796,16 @@ async function syncODMySql(syncDate) {
     } catch (typeErr) {
       log(`[OD MySQL Sync] Appointment types skipped: ${typeErr.message}`);
     }
+    // AGENT-EXT: the office's own confirmation-status palette (definition
+    // Category 2), pushed once per frame rather than per appointment. Skipped
+    // silently on an OD that does not expose it — the board keeps its current
+    // status colors.
+    let statusDefinitions = [];
+    try {
+      statusDefinitions = await getStatusDefinitions();
+    } catch (defErr) {
+      log(`[OD MySQL Sync] Status definitions skipped: ${defErr.message}`);
+    }
 
     const enriched = [];
     for (const apt of apts) {
@@ -4818,7 +4844,8 @@ async function syncODMySql(syncDate) {
           AptNum: apt.AptNum,
           PatNum: apt.PatNum,
           AptDateTime: apt.AptDateTime,
-          appointment_type: typeByAptNum.get(Number(apt.AptNum))?.type_name ?? null,
+          appointment_type:
+            typeByAptNum.get(Number(apt.AptNum))?.type_name ?? null,
           type_color: typeByAptNum.get(Number(apt.AptNum))?.type_color ?? null,
           patient: {
             FName: apt.FName,
@@ -4842,7 +4869,34 @@ async function syncODMySql(syncDate) {
           hygienist_abbr: apt.HygAbbr ?? null,
           apt_status: apt.AptStatus ?? null,
           production_cents:
-            apt.Production != null ? Math.round(Number(apt.Production) * 100) : null,
+            apt.Production != null
+              ? Math.round(Number(apt.Production) * 100)
+              : null,
+          // ── AGENT-EXT board fields ──────────────────────────────────────
+          // Straight pass-through of what the probed SELECT returned: no
+          // conversion, no sentinel handling, no guessing. OD's signed-ARGB
+          // colors and its 0001-01-01 zero-dates travel raw and the backend
+          // normalizes them once (P2 ingest). A column this Open Dental does
+          // not have is simply absent from the row and lands as null.
+          confirmed_def_num: apt.Confirmed ?? null,
+          arrived_at: apt.DateTimeArrived ?? null,
+          seated_at: apt.DateTimeSeated ?? null,
+          dismissed_at: apt.DateTimeDismissed ?? null,
+          is_new_patient: apt.IsNewPatient ?? null,
+          is_hygiene: apt.IsHygiene ?? null,
+          provider_color: apt.ProvColor ?? null,
+          premed: apt.Premed ?? null,
+          medical_alert: apt.MedUrgNote ?? null,
+          preferred_name: apt.Preferred ?? null,
+          // Whichever balance column this OD has (see AGENT_EXT_COLUMNS).
+          // OD stores dollars; the backend's ingest expects cents.
+          balance_cents: odBalanceToCents(apt.BalTotal ?? apt.EstBalance),
+          balance_source:
+            apt.BalTotal != null
+              ? "BalTotal"
+              : apt.EstBalance != null
+                ? "EstBalance"
+                : null,
           source: "od_mysql",
         });
       } catch (e) {
@@ -4864,6 +4918,9 @@ async function syncODMySql(syncDate) {
         date: targetDate,
         appointments: enriched,
         operatories,
+        // AGENT-EXT: office-level, so it rides the frame once rather than on
+        // every appointment. [] when this OD does not expose the palette.
+        status_definitions: statusDefinitions,
         source: "od_mysql",
       }),
     );
