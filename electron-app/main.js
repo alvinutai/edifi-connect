@@ -20,6 +20,8 @@ const {
   getPatNumByNameDOB,
   getAppointmentsForDate,
   getAppointmentsToday,
+  getOperatories,
+  getAppointmentTypesForDate,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
   writeOdBenefits,
@@ -4761,6 +4763,24 @@ async function syncODMySql(syncDate) {
     log(
       `[OD MySQL Sync] ${apts.length} appointments — pulling insurance snapshots...`,
     );
+
+    // Board layout (all non-hidden operatory columns) + per-appointment type
+    // colors. Both reads fail open — a missing operatory/appointmenttype table
+    // must never block the insurance sync.
+    let operatories = [];
+    let typeByAptNum = new Map();
+    try {
+      operatories = await getOperatories();
+    } catch (opErr) {
+      log(`[OD MySQL Sync] Operatory list skipped: ${opErr.message}`);
+    }
+    try {
+      const aptTypes = await getAppointmentTypesForDate(targetDate);
+      typeByAptNum = new Map(aptTypes.map((t) => [t.apt_num, t]));
+    } catch (typeErr) {
+      log(`[OD MySQL Sync] Appointment types skipped: ${typeErr.message}`);
+    }
+
     const enriched = [];
     for (const apt of apts) {
       try {
@@ -4798,6 +4818,8 @@ async function syncODMySql(syncDate) {
           AptNum: apt.AptNum,
           PatNum: apt.PatNum,
           AptDateTime: apt.AptDateTime,
+          appointment_type: typeByAptNum.get(Number(apt.AptNum))?.type_name ?? null,
+          type_color: typeByAptNum.get(Number(apt.AptNum))?.type_color ?? null,
           patient: {
             FName: apt.FName,
             LName: apt.LName,
@@ -4811,6 +4833,16 @@ async function syncODMySql(syncDate) {
           proc_codes: procCodes,
           est_patient_cents: estPatientCents,
           fee_appt_cents: feeApptCents,
+          operatory: apt.Op ?? null,
+          operatory_name: apt.OpName ?? null,
+          operatory_abbrev: apt.OpAbbrev ?? null,
+          pattern: apt.Pattern ?? null,
+          duration_minutes: apt.DurationMin ?? null,
+          provider_abbr: apt.ProvAbbr ?? null,
+          hygienist_abbr: apt.HygAbbr ?? null,
+          apt_status: apt.AptStatus ?? null,
+          production_cents:
+            apt.Production != null ? Math.round(Number(apt.Production) * 100) : null,
           source: "od_mysql",
         });
       } catch (e) {
@@ -4831,6 +4863,7 @@ async function syncODMySql(syncDate) {
         type: "OD_DATA_PUSH",
         date: targetDate,
         appointments: enriched,
+        operatories,
         source: "od_mysql",
       }),
     );

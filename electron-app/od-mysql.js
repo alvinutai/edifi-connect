@@ -76,6 +76,7 @@ let pool = null;
 let configCache = null;
 let covCatCache = null; // cached CovCatNum map — invalidated on reconnect
 let codeGroupAvailable = null; // cached CodeGroup capability probe — invalidated on reconnect
+let appointmentTypeAvailable = null; // cached appointmenttype capability probe (session-scoped)
 let available = null; // null = unknown, true/false = tested
 let logger = (msg) => console.log(`[OD MySQL] ${msg}`); // overridden by main.js
 let manualConfigOverride = null; // set by SET_MYSQL_CONFIG command — bypasses file scan
@@ -323,6 +324,46 @@ async function probeCodeGroupSupport() {
   }
 }
 
+// ─── AppointmentType Capability Probe ─────────────────────────────────────────
+// Read-only probe: older OD schemas have no `appointmenttype` table (and no
+// appointment.AppointmentTypeNum column). Mirrors probeCodeGroupSupport —
+// cached per session; any failure is treated as "not available" so the board
+// simply renders without per-type colors.
+
+async function probeAppointmentTypeSupport() {
+  if (appointmentTypeAvailable !== null) return appointmentTypeAvailable;
+  const p = await getPool();
+  if (!p) {
+    appointmentTypeAvailable = false;
+    return false;
+  }
+  try {
+    const [[colRow]] = await p.query(
+      `SELECT COUNT(*) AS cnt
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'appointment'
+         AND COLUMN_NAME = 'AppointmentTypeNum'`,
+    );
+    const [[tableRow]] = await p.query(
+      `SELECT COUNT(*) AS cnt
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'appointmenttype'`,
+    );
+    appointmentTypeAvailable =
+      Number(colRow?.cnt || 0) > 0 && Number(tableRow?.cnt || 0) > 0;
+    logger(
+      `AppointmentType support probe: ${appointmentTypeAvailable ? "available" : "unavailable"}`,
+    );
+    return appointmentTypeAvailable;
+  } catch (e) {
+    logger(`AppointmentType support probe failed: ${e.message}`);
+    appointmentTypeAvailable = false;
+    return false;
+  }
+}
+
 // ─── Patient Plan Lookup ──────────────────────────────────────────────────────
 
 async function getPatientPlanInfo(patNum) {
@@ -540,10 +581,22 @@ async function getAppointmentsForDate(date) {
   try {
     const [rows] = await p.query(
       `SELECT a.AptNum, a.PatNum, a.AptDateTime,
+              a.Op, a.Pattern, a.ProvNum, a.ProvHyg, a.AptStatus,
+              CHAR_LENGTH(a.Pattern) * 5 AS DurationMin,
               p.FName, p.LName, p.Birthdate,
-              p.HmPhone, p.WkPhone, p.Email
+              p.HmPhone, p.WkPhone, p.Email,
+              op.OpName, op.Abbrev AS OpAbbrev,
+              prov.Abbr AS ProvAbbr,
+              hyg.Abbr  AS HygAbbr,
+              (SELECT ROUND(SUM(pl.ProcFee), 2)
+                 FROM procedurelog pl
+                WHERE pl.AptNum = a.AptNum
+                  AND pl.ProcStatus IN (1, 2)) AS Production
        FROM appointment a
-       JOIN patient p ON p.PatNum = a.PatNum
+       LEFT JOIN patient   p    ON p.PatNum        = a.PatNum
+       LEFT JOIN operatory op   ON op.OperatoryNum = a.Op
+       LEFT JOIN provider  prov ON prov.ProvNum    = a.ProvNum
+       LEFT JOIN provider  hyg  ON hyg.ProvNum      = a.ProvHyg
        WHERE DATE(a.AptDateTime) = ?
          AND a.AptStatus IN (1, 2)
        ORDER BY a.AptDateTime`,
@@ -821,15 +874,79 @@ async function writeOdBenefits(params) {
   return result;
 }
 
+// ─── Operatory Columns (board layout, read-only) ──────────────────────────────
+// OD renders EVERY non-hidden operatory as a board column in ItemOrder — not
+// just the occupied ones. Returned rows are the column list itself.
+
+async function getOperatories() {
+  const p = await getPool();
+  if (!p) return [];
+  try {
+    const [rows] = await p.query(
+      `SELECT OperatoryNum, OpName, Abbrev, ItemOrder, IsHidden
+         FROM operatory
+        WHERE IsHidden = 0
+        ORDER BY ItemOrder`,
+    );
+    return rows.map((r) => ({
+      operatory_num: Number(r.OperatoryNum),
+      name: String(r.OpName || "").trim(),
+      abbrev: String(r.Abbrev || "").trim(),
+      item_order: Number(r.ItemOrder),
+    }));
+  } catch (e) {
+    logger(`getOperatories error: ${e.message}`);
+    return [];
+  }
+}
+
+// ─── Appointment Types for a Date (read-only, probe-guarded) ──────────────────
+// Resolves each appointment's type name + OD packed color. Deliberately keyed
+// off AptNum in its own query so the primary getAppointmentsForDate SELECT is
+// untouched. Hidden types are NOT filtered out: an appointment assigned a
+// since-hidden type still renders with that type's color in OD.
+
+async function getAppointmentTypesForDate(date) {
+  if (!(await probeAppointmentTypeSupport())) return [];
+  const p = await getPool();
+  if (!p) return [];
+  const targetDate = date || new Date().toISOString().slice(0, 10);
+  try {
+    const [rows] = await p.query(
+      `SELECT a.AptNum, a.AppointmentTypeNum,
+              at.AppointmentTypeName, at.AppointmentTypeColor
+         FROM appointment a
+         JOIN appointmenttype at
+           ON at.AppointmentTypeNum = a.AppointmentTypeNum
+        WHERE DATE(a.AptDateTime) = ?
+          AND a.AppointmentTypeNum <> 0`,
+      [targetDate],
+    );
+    return rows.map((r) => ({
+      apt_num: Number(r.AptNum),
+      appointment_type_num: Number(r.AppointmentTypeNum),
+      type_name: String(r.AppointmentTypeName || "").trim() || null,
+      type_color:
+        r.AppointmentTypeColor != null ? Number(r.AppointmentTypeColor) : null,
+    }));
+  } catch (e) {
+    logger(`getAppointmentTypesForDate error (${targetDate}): ${e.message}`);
+    return [];
+  }
+}
+
 module.exports = {
   isAvailable,
   readOdConfig,
   getBenefitsForPatient,
   mapMysqlBenefitRow,
   probeCodeGroupSupport,
+  probeAppointmentTypeSupport,
   getPatNumByNameDOB,
   getAppointmentsForDate,
   getAppointmentsToday,
+  getOperatories,
+  getAppointmentTypesForDate,
   getPatientInsuranceSnapshot,
   getAppointmentProcedures,
   writeOdBenefits,
