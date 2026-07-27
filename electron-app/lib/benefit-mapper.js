@@ -214,6 +214,36 @@ function toNonNegativeFiniteOrNull(raw) {
 }
 
 /**
+ * The raw OD `EbenefitCat` as it must cross the wire.
+ *
+ * `Number(x ?? 0) || null` erased a legitimate ZERO. OD's 0 is "None" — a real
+ * statement that the office assigned no category — and nulling it made the
+ * backend read ABSENCE and fall back to the agent's own category label, so the
+ * backend's fail-closed rule was unreachable for exactly the value it exists
+ * for. Same falsy-coercion bug shape as the `> 0` benefit gates B-014 removed.
+ *
+ * The backend decides what a value MEANS; this only decides whether the field
+ * was there. Three outcomes, and the difference between the last two is the
+ * whole point:
+ *
+ *   absent (null/undefined/blank)  → null      the backend may use the agent's
+ *                                              category, as it always could
+ *   finite number, 0 included      → that number
+ *   present but unreadable         → the value as-sent, so the backend still
+ *                                              sees PRESENCE and fails closed
+ *                                              rather than trusting a label it
+ *                                              knows to be misaligned
+ *
+ * KEEP IN SYNC with the identical copy in main.js.
+ */
+function odRawEbenefitCat(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  const n = toFiniteNumberOrNull(raw);
+  return n != null ? n : raw;
+}
+
+/**
  * Map raw OD benefit rows to structured entries.
  * Mirrors mapOdApiBenefits() in main.js exactly, minus logging and caches.
  * Adds `ebenefitcat` and `category_source` fields (present in v2.3.64 production too).
@@ -255,7 +285,7 @@ function mapBenefits(rawBenefits, catMap, procCodeMap) {
       coverage_level,
       benefit_num: b.BenefitNum ?? null,
       cov_cat_num: Number(b.CovCatNum) || 0,
-      ebenefitcat: Number(b.EbenefitCat ?? 0) || null,
+      ebenefitcat: odRawEbenefitCat(b.EbenefitCat),
       category_source: categorySource,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,
@@ -374,4 +404,5 @@ module.exports = {
   mapBenefits,
   toFiniteNumberOrNull,
   toNonNegativeFiniteOrNull,
+  odRawEbenefitCat,
 };

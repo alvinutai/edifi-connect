@@ -852,24 +852,21 @@ async function handleDownloadUpdate(commandId) {
 
 // ── SYNC_OD_NOW ───────────────────────────────────────────────────────────────
 
+// The runner is the ONLY availability authority here.
+//
+// This used to open with a cached `isMysqlAvailable()` preflight, which made
+// two things possible:
+//   · recovery suppression — after one failure `available` stays false for up
+//     to five minutes, so an office with no REST config was told
+//     OD_NOT_CONFIGURED even though MySQL was back and recheckAvailability()
+//     would have reconnected;
+//   · false success — cached true, database since died, no REST: the preflight
+//     passed, the runner correctly selected `none`, and the handler still set
+//     last_success_at and reported COMPLETED for a sync that never ran.
+// The selection now decides both the outcome and the reported state.
 async function handleSyncOdNow(commandId, payload) {
   od_sync_status.last_attempt_at = new Date().toISOString();
   const syncDate = payload?.sync_date || null; // null = today
-  const mysqlOk = await isMysqlAvailable().catch(() => false);
-
-  if (!mysqlOk && !config.od_api_url) {
-    od_sync_status.last_error =
-      "Neither OD MySQL nor OD Web Service is configured";
-    sendCommandResult(
-      commandId,
-      "SYNC_OD_NOW",
-      "FAILED",
-      null,
-      "OD_NOT_CONFIGURED",
-      od_sync_status.last_error,
-    );
-    return;
-  }
 
   try {
     // Report STARTED before the sync begins
@@ -887,6 +884,21 @@ async function handleSyncOdNow(commandId, payload) {
     }
 
     const selection = await runSelectedSync(syncDate, "sync_od_now");
+
+    if (selection.path === "none") {
+      // Nothing ran, so nothing succeeded. Success state is not touched.
+      od_sync_status.last_error =
+        "Neither OD MySQL nor OD Web Service is available";
+      sendCommandResult(
+        commandId,
+        "SYNC_OD_NOW",
+        "FAILED",
+        null,
+        "OD_NOT_CONFIGURED",
+        od_sync_status.last_error,
+      );
+      return;
+    }
 
     od_sync_status.last_success_at = new Date().toISOString();
     od_sync_status.last_error = null;
@@ -4342,6 +4354,28 @@ function toNonNegativeFiniteOrNull(raw) {
   return n != null && n >= 0 ? n : null;
 }
 
+/**
+ * The raw OD `EbenefitCat` as it must cross the wire.
+ *
+ * `Number(x ?? 0) || null` erased a legitimate ZERO. OD's 0 is "None" — a real
+ * statement that the office assigned no category — and nulling it made the
+ * backend read ABSENCE and fall back to the agent's own category label, so the
+ * backend's fail-closed rule was unreachable for exactly the value it exists
+ * for.
+ *
+ * absent (null/undefined/blank) → null · finite number incl. 0 → that number ·
+ * present but unreadable → as-sent, so the backend sees PRESENCE and fails
+ * closed rather than trusting a label it knows to be misaligned.
+ *
+ * KEEP IN SYNC with the identical copy in lib/benefit-mapper.js.
+ */
+function odRawEbenefitCat(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string" && raw.trim() === "") return null;
+  const n = toFiniteNumberOrNull(raw);
+  return n != null ? n : raw;
+}
+
 function mapOdApiBenefits(rawBenefits) {
   // Handles both numeric (MySQL path) and string (REST API /benefits path) BenefitType values
   const BEN_TYPE = {
@@ -4434,7 +4468,7 @@ function mapOdApiBenefits(rawBenefits) {
       coverage_level,
       benefit_num: b.BenefitNum ?? null,
       cov_cat_num: Number(b.CovCatNum) || 0,
-      ebenefitcat: Number(b.EbenefitCat ?? 0) || null,
+      ebenefitcat: odRawEbenefitCat(b.EbenefitCat),
       category_source: categorySource,
       plan_num: Number(b.PlanNum) || 0,
       pat_plan_num: Number(b.PatPlanNum) || 0,

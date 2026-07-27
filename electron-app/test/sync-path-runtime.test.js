@@ -192,6 +192,133 @@ function makeRuntime({ probeResults, hasRestConfig }) {
     assert.deepStrictEqual(rt.ran, ["rest"]);
   });
 
+  // ── The on-demand handler: one availability authority ─────────────────────
+  //
+  // handleSyncOdNow used to open with a CACHED isMysqlAvailable() preflight,
+  // outside the runner. Two real failures followed: a recovered database was
+  // refused with OD_NOT_CONFIGURED for up to five minutes, and a database that
+  // died after a cached-true probe produced a COMPLETED result for a sync that
+  // never ran. These drive the real handler composed with the real runner, so a
+  // reintroduced preflight fails here rather than in an office.
+
+  const handlerSrc = mainSrc.slice(
+    mainSrc.indexOf("async function handleSyncOdNow("),
+    mainSrc.indexOf("function readOdFreeDentalConfig("),
+  );
+
+  /**
+   * `stale` is what a cached isMysqlAvailable() would answer; `fresh` is what
+   * the live pool actually says now. They differ on purpose — the outcome must
+   * follow `fresh`.
+   */
+  function makeHandler({ stale, fresh, hasRestConfig }) {
+    const ran = [];
+    const results = [];
+    const status = {};
+    const factory = new Function(
+      "deps",
+      `
+      const { log, config, isMysqlAvailable, recheckMysqlAvailability,
+              syncODMySql, syncODData, sendCommandResult, od_sync_status,
+              tunnel, tunnelOk, AGENT_INSTANCE_ID } = deps;
+      ${selectionBlock}
+      ${handlerSrc}
+      return handleSyncOdNow;
+      `,
+    );
+    const handleSyncOdNow = factory({
+      log: () => {},
+      config: { od_api_url: hasRestConfig ? "https://od.example" : null },
+      isMysqlAvailable: async () => stale,
+      recheckMysqlAvailability: async () => fresh,
+      syncODMySql: async () => {
+        ran.push("mysql");
+      },
+      syncODData: async () => {
+        ran.push("rest");
+      },
+      sendCommandResult: (commandId, type, status_, payload, code, message) =>
+        results.push({ status: status_, payload, code, message }),
+      od_sync_status: status,
+      tunnel: null,
+      tunnelOk: false,
+      AGENT_INSTANCE_ID: "test-agent",
+    });
+    return { handleSyncOdNow, ran, results, status };
+  }
+
+  await test("a recovered database is synced even though the cache said false", async () => {
+    // No REST configured. The old preflight returned OD_NOT_CONFIGURED here and
+    // never let recheckAvailability reconnect.
+    const h = makeHandler({ stale: false, fresh: true, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-1", {});
+    assert.deepStrictEqual(h.ran, ["mysql"]);
+  });
+
+  await test("the recovered run reports COMPLETED with the real method", async () => {
+    const h = makeHandler({ stale: false, fresh: true, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-1", {});
+    assert.deepStrictEqual(h.results.at(-1).status, "COMPLETED");
+  });
+
+  await test("a database that died since the cached probe runs no sync", async () => {
+    // Cached true, MySQL now gone, no REST. The runner selects `none`.
+    const h = makeHandler({ stale: true, fresh: false, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-2", {});
+    assert.deepStrictEqual(h.ran, []);
+  });
+
+  await test("that run reports FAILED, not a completed sync that never happened", async () => {
+    const h = makeHandler({ stale: true, fresh: false, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-2", {});
+    assert.strictEqual(h.results.at(-1).status, "FAILED");
+  });
+
+  await test("and it does not stamp success state", async () => {
+    const h = makeHandler({ stale: true, fresh: false, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-2", {});
+    assert.strictEqual(h.status.last_success_at, undefined);
+  });
+
+  await test("and it names the reason truthfully", async () => {
+    const h = makeHandler({ stale: true, fresh: false, hasRestConfig: false });
+    await h.handleSyncOdNow("cmd-2", {});
+    assert.strictEqual(h.results.at(-1).code, "OD_NOT_CONFIGURED");
+  });
+
+  await test("result, state and action agree on the MySQL path", async () => {
+    const h = makeHandler({ stale: false, fresh: true, hasRestConfig: true });
+    await h.handleSyncOdNow("cmd-3", {});
+    assert.deepStrictEqual(
+      { ran: h.ran, method: h.results.at(-1).payload.sync_method },
+      { ran: ["mysql"], method: "od_mysql" },
+    );
+  });
+
+  await test("result, state and action agree on the REST path", async () => {
+    const h = makeHandler({ stale: true, fresh: false, hasRestConfig: true });
+    await h.handleSyncOdNow("cmd-4", {});
+    assert.deepStrictEqual(
+      { ran: h.ran, method: h.results.at(-1).payload.sync_method },
+      { ran: ["rest"], method: "od_rest_api" },
+    );
+  });
+
+  await test("a successful run clears the previous error", async () => {
+    const h = makeHandler({ stale: false, fresh: true, hasRestConfig: false });
+    h.status.last_error = "stale failure";
+    await h.handleSyncOdNow("cmd-5", {});
+    assert.strictEqual(h.status.last_error, null);
+  });
+
+  await test("the handler holds no availability probe of its own", () => {
+    // The structural guarantee behind every case above.
+    assert.ok(
+      !/isMysqlAvailable\(\)/.test(handlerSrc),
+      "handleSyncOdNow probes availability outside the runner again",
+    );
+  });
+
   // ── The scheduled branch wiring ───────────────────────────────────────────
 
   await test("the interval calls the selector-driven runner, not a captured function", () => {

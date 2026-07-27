@@ -11,6 +11,7 @@ const path = require("path");
 const {
   toFiniteNumberOrNull,
   toNonNegativeFiniteOrNull,
+  odRawEbenefitCat,
 } = require("./lib/benefit-mapper");
 
 // Common OD installation paths on Windows
@@ -613,7 +614,7 @@ function mapMysqlBenefitRow(r, fallbackReasons) {
     coverage_level,
     benefit_num: r.BenefitNum ?? null,
     cov_cat_num: Number(r.CovCatNum) || 0,
-    ebenefitcat: Number(r.EbenefitCat ?? 0) || null,
+    ebenefitcat: odRawEbenefitCat(r.EbenefitCat),
     code_num: Number(r.CodeNum) || null,
     proc_code: typeof r.ProcCode === "string" && r.ProcCode ? r.ProcCode : null,
     code_group_num: Number(r.CodeGroupNum) || null,
