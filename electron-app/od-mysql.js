@@ -479,7 +479,13 @@ async function getPatientPlanInfo(patNum) {
   if (!p) return null;
   try {
     const [rows] = await p.query(
-      `SELECT pp.PatPlanNum, isub.InsPlanNum AS PlanNum, pp.Ordinal
+      // OD's inssub FK to insplan is PlanNum. The prior `isub.InsPlanNum` does
+      // not exist in the OD schema, so every call threw into the catch below
+      // and returned null — which made getBenefitsForPatient return [] for
+      // every patient, silently. Flagged 2026-06-11 (format-b audit §5),
+      // confirmed 2026-07-27 against the vendor schema and the sibling query
+      // in getPatientInsuranceSnapshot, which has always joined isub.PlanNum.
+      `SELECT pp.PatPlanNum, isub.PlanNum, pp.Ordinal
        FROM patplan pp
        JOIN inssub isub ON isub.InsSubNum = pp.InsSubNum
        WHERE pp.PatNum = ? AND pp.Ordinal = 1
@@ -487,7 +493,8 @@ async function getPatientPlanInfo(patNum) {
       [patNum],
     );
     return rows[0] || null;
-  } catch {
+  } catch (e) {
+    logger(`[OD MySQL] plan lookup failed for PatNum ${patNum}: ${e.message}`);
     return null;
   }
 }
